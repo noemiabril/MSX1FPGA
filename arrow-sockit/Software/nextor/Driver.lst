@@ -1,0 +1,1924 @@
+# file opened: DriverM.asm
+   1  0000              ; MSX1 FPGA project
+   2  0000              ;
+   3  0000              ;Copyright (c) 2016 Fabio Belavenuto
+   4  0000              ;
+   5  0000              ;This program is free software: you can redistribute it and/or modify
+   6  0000              ;it under the terms of the GNU General Public License as published by
+   7  0000              ;the Free Software Foundation, either version 3 of the License, or
+   8  0000              ;(at your option) any later version.
+   9  0000              ;
+  10  0000              ;This program is distributed in the hope that it will be useful,
+  11  0000              ;but WITHOUT ANY WARRANTY; without even the implied warranty of
+  12  0000              ;MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  13  0000              ;GNU General Public License for more details.
+  14  0000              ;
+  15  0000              ;You should have received a copy of the GNU General Public License
+  16  0000              ;along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  17  0000
+  18  0000              ; Technical info:
+  19  0000              ; I/O port 0x9E: Interface status and card select register (read/write)
+  20  0000              ;	<read>
+  21  0000              ;	b0	: 1=SD disk was changed (If Hardware Disk Change is available)
+  22  0000              ;	b1	: 0=SD card present
+  23  0000              ;	b2	: 1=Write protecton enabled for SD card
+  24  0000              ;	b3-7: Reserved for future use. Must be masked out from readings.
+  25  0000              ;	<write>
+  26  0000              ;	b0	: SD card chip-select (0=selected)
+  27  0000              ; I/O port 0x9F: SPI data transfer (read/write)
+  28  0000
+  29  0000              ; Comments in Brazilian Portuguese, sorry :(
+  30  0000
+  31  0000              	output	"driver.bin"
+  32  0000
+  33  0000              ; Uses HW (1) or SW (0) disk-change:
+  34  0000              ;HWDS = 0
+  35  0000
+  36  0000
+  37  0000              ;-----------------------------------------------------------------------------
+  38  0000              ;
+  39  0000              ; Miscellaneous constants
+  40  0000              ;
+  41  0000
+  42  0000              ;This is a 2 byte buffer to store the address of code to be executed.
+  43  0000              ;It is used by some of the kernel page 0 routines.
+  44  0000
+  45  0000              CODE_ADD:	equ	0F84Ch
+  46  0000
+  47  0000
+  48  0000              ;-----------------------------------------------------------------------------
+  49  0000              ;
+  50  0000              ; Driver configuration constants
+  51  0000              ;
+  52  0000
+  53  0000              ;Driver type:
+  54  0000              ;   0 for drive-based
+  55  0000              ;   1 for device-based
+  56  0000
+  57  0000              DRV_TYPE	equ	1
+  58  0000
+  59  0000              ;Hot-plug devices support (device-based drivers only):
+  60  0000              ;   0 for no hot-plug support
+  61  0000              ;   1 for hot-plug support
+  62  0000
+  63  0000              DRV_HOTPLUG	equ	0 ;Testing Mister
+  64  0000
+  65  0000              ;Driver version
+  66  0000
+  67  0000              VER_MAIN	equ	1
+  68  0000              VER_SEC		equ	0
+  69  0000              VER_REV		equ	0
+  70  0000
+  71  0000
+  72  0000              ;-----------------------------------------------------------------------------
+  73  0000              ;
+  74  0000              ; Error codes for DEV_RW
+  75  0000              ;
+  76  0000
+  77  0000              ENCOMP	equ	0FFh
+  78  0000              EWRERR	equ	0FEh
+  79  0000              EDISK	equ	0FDh
+  80  0000              ENRDY	equ	0FCh
+  81  0000              EDATA	equ	0FAh
+  82  0000              ERNF	equ	0F9h
+  83  0000              EWPROT	equ	0F8h
+  84  0000              EUFORM	equ	0F7h
+  85  0000              ESEEK	equ	0F3h
+  86  0000              EIFORM	equ	0F0h
+  87  0000              EIDEVL	equ	0B5h
+  88  0000              EIPARM	equ	08Bh
+  89  0000
+  90  0000              ;-----------------------------------------------------------------------------
+  91  0000              ;
+  92  0000              ; Routines and information available on kernel page 0
+  93  0000              ;
+  94  0000
+  95  0000              ;* Get in A the current slot for page 1. Corrupts F.
+  96  0000              ;  Must be called by using CALBNK to bank 0:
+  97  0000              ;    xor a
+  98  0000              ;    ld ix,GSLOT1
+  99  0000              ;    call CALBNK
+ 100  0000
+ 101  0000              GSLOT1	equ	402Dh
+ 102  0000
+ 103  0000
+ 104  0000              ;* This routine reads a byte from another bank.
+ 105  0000              ;  Must be called by using CALBNK to the desired bank,
+ 106  0000              ;  passing the address to be read in HL:
+ 107  0000              ;    ld a,<bank number>
+ 108  0000              ;    ld hl,<byte address>
+ 109  0000              ;    ld ix,RDBANK
+ 110  0000              ;    call CALBNK
+ 111  0000
+ 112  0000              RDBANK	equ	403Ch
+ 113  0000
+ 114  0000
+ 115  0000              ;* This routine temporarily switches kernel main bank
+ 116  0000              ;  (usually bank 0, but will be 3 when running in MSX-DOS 1 mode),
+ 117  0000              ;  then invokes the routine whose address is at (CODE_ADD).
+ 118  0000              ;  It is necessary to use this routine to invoke CALBAS
+ 119  0000              ;  (so that kernel bank is correct in case of BASIC error)
+ 120  0000              ;  and to invoke DOS functions via F37Dh hook.
+ 121  0000              ;
+ 122  0000              ;  Input:  Address of code to invoke in (CODE_ADD).
+ 123  0000              ;          AF, BC, DE, HL, IX, IY passed to the called routine.
+ 124  0000              ;  Output: AF, BC, DE, HL, IX, IY returned from the called routine.
+ 125  0000
+ 126  0000              CALLB0	equ	403Fh
+ 127  0000
+ 128  0000
+ 129  0000              ;* Call a routine in another bank.
+ 130  0000              ;  Must be used if the driver spawns across more than one bank.
+ 131  0000              ;
+ 132  0000              ;  Input:  A = bank number
+ 133  0000              ;          IX = routine address
+ 134  0000              ;          AF' = AF for the routine
+ 135  0000              ;          HL' = Ix for the routine
+ 136  0000              ;          BC, DE, HL, IY = input for the routine
+ 137  0000              ;  Output: AF, BC, DE, HL, IX, IY returned from the called routine.
+ 138  0000
+ 139  0000              CALBNK	equ	4042h
+ 140  0000
+ 141  0000
+ 142  0000              ;* Get in IX the address of the SLTWRK entry for the slot passed in A,
+ 143  0000              ;  which will in turn contain a pointer to the allocated page 3
+ 144  0000              ;  work area for that slot (0 if no work area was allocated).
+ 145  0000              ;  If A=0, then it uses the slot currently switched in page 1.
+ 146  0000              ;  Returns A=current slot for page 1, if A=0 was passed.
+ 147  0000              ;  Corrupts F.
+ 148  0000              ;  Must be called by using CALBNK to bank 0:
+ 149  0000              ;    ld a,<slot number> (xor a for current page 1 slot)
+ 150  0000              ;    ex af,af'
+ 151  0000              ;    xor a
+ 152  0000              ;    ld ix,GWORK
+ 153  0000              ;    call CALBNK
+ 154  0000
+ 155  0000              GWORK	equ	4045h
+ 156  0000
+ 157  0000
+ 158  0000              ;* This address contains one byte that tells how many banks
+ 159  0000              ;  form the Nextor kernel (or alternatively, the first bank
+ 160  0000              ;  number of the driver).
+ 161  0000
+ 162  0000              K_SIZE	equ	40FEh
+ 163  0000
+ 164  0000
+ 165  0000              ;* This address contains one byte with the current bank number.
+ 166  0000
+ 167  0000              CUR_BANK	equ	40FFh
+ 168  0000
+ 169  0000
+ 170  0000              ;-----------------------------------------------------------------------------
+ 171  0000              ;
+ 172  0000              ; Built-in format choice strings
+ 173  0000              ;
+ 174  0000
+ 175  0000              NULL_MSG  equ     781Fh		;Null string (disk can't be formatted)
+ 176  0000              SING_DBL  equ     7820h 	;"1-Single side / 2-Double side"
+ 177  0000
+ 178  0000
+ 179  0000              ; Enderecos ROM
+ 180  0000
+ 181  0000              BIOS_INITXT	= $6C		; Inicializa SCREEN0
+ 182  0000              BIOS_CHPUT	= $A2		; A=char
+ 183  0000              BIOS_CLS	= $C3		; Chamar com A=0
+ 184  0000              LINL40		= $F3AE		; Width
+ 185  0000              LINLEN		= $F3B0
+ 186  0000
+ 187  0000              ; Enderecos SPI
+ 188  0000
+ 189  0000              PORTCFG		= $9E
+ 190  0000              PORTSTATUS	= $9E
+ 191  0000              PORTSPI		= $9F
+ 192  0000
+ 193  0000              ; Comandos SPI:
+ 194  0000              CMD0	= 0  | $40
+ 195  0000              CMD1	= 1  | $40
+ 196  0000              CMD8	= 8  | $40
+ 197  0000              CMD9	= 9  | $40
+ 198  0000              CMD10	= 10 | $40
+ 199  0000              CMD12	= 12 | $40
+ 200  0000              CMD16	= 16 | $40
+ 201  0000              CMD17	= 17 | $40
+ 202  0000              CMD18	= 18 | $40
+ 203  0000              CMD24	= 24 | $40
+ 204  0000              CMD25	= 25 | $40
+ 205  0000              CMD55	= 55 | $40
+ 206  0000              CMD58	= 58 | $40
+ 207  0000              ACMD23	= 23 | $40
+ 208  0000              ACMD41	= 41 | $40
+ 209  0000
+ 210  0000              	org	$4000
+ 211  4000
+ 212  4000 FF FF FF...  	ds	256, $FF	; 256 dummy bytes
+ 213  4100
+ 214  4100              DRV_START:
+ 215  4100
+ 216  4100              ;-----------------------------------------------------------------------------
+ 217  4100              ;
+ 218  4100              ; Driver signature
+ 219  4100              ;
+ 220  4100 4E 45 58 54  	db	"NEXTOR_DRIVER",0
+ 220  4104 4F 52 5F 44
+ 220  4108 52 49 56 45
+ 220  410C 52 00
+ 221  410E
+ 222  410E
+ 223  410E              ;-----------------------------------------------------------------------------
+ 224  410E              ;
+ 225  410E              ; Driver flags:
+ 226  410E              ;    bit 0: 0 for drive-based, 1 for device-based
+ 227  410E              ;    bit 1: 1 for hot-plug devices supported (device-based drivers only)
+ 228  410E 01           	db	DRV_TYPE+(2*DRV_HOTPLUG)
+ 229  410F
+ 230  410F              ;-----------------------------------------------------------------------------
+ 231  410F              ;
+ 232  410F              ; Reserved byte
+ 233  410F              ;
+ 234  410F
+ 235  410F 00           	db	0
+ 236  4110
+ 237  4110
+ 238  4110              ;-----------------------------------------------------------------------------
+ 239  4110              ;
+ 240  4110              ; Driver name
+ 241  4110              ;
+ 242  4110
+ 243  4110              DRV_NAME:
+ 244  4110 53 44 20 44  	db	"SD Driver"
+ 244  4114 72 69 76 65
+ 244  4118 72
+ 245  4119 20 20 20...  	ds	32-($-DRV_NAME)," "
+ 246  4130
+ 247  4130
+ 248  4130              ;-----------------------------------------------------------------------------
+ 249  4130              ;
+ 250  4130              ; Jump table for the driver public routines
+ 251  4130              ;
+ 252  4130
+ 253  4130              	; These routines are mandatory for all drivers
+ 254  4130                      ; (but probably you need to implement only DRV_INIT)
+ 255  4130
+ 256  4130 C3 6C 41     	jp	DRV_TIMI
+ 257  4133 C3 F5 41     	jp	DRV_VERSION
+ 258  4136 C3 6D 41     	jp	DRV_INIT
+ 259  4139 C3 FC 41     	jp	DRV_BASSTAT
+ 260  413C C3 FE 41     	jp	DRV_BASDEV
+ 261  413F C3 00 42     	jp	DRV_EXTBIO
+ 262  4142 C3 01 42     	jp	DRV_DIRECT0
+ 263  4145 C3 01 42     	jp	DRV_DIRECT1
+ 264  4148 C3 01 42     	jp	DRV_DIRECT2
+ 265  414B C3 01 42     	jp	DRV_DIRECT3
+ 266  414E C3 01 42     	jp	DRV_DIRECT4
+ 267  4151
+ 268  4151 00 00 00...  	ds	15
+ 269  4160
+ 270  4160              	; These routines are mandatory for device-based drivers
+ 271  4160
+ 272  4160 C3 02 42     	jp	DEV_RW
+ 273  4163 C3 70 42     	jp	DEV_INFO
+ 274  4166 C3 08 43     	jp	DEV_STATUS
+ 275  4169 C3 36 43     	jp	LUN_INFO
+ 276  416C
+ 277  416C
+ 278  416C              ;=====
+ 279  416C              ;=====  END of data that must be at fixed addresses
+ 280  416C              ;=====
+ 281  416C
+ 282  416C
+ 283  416C              ;-----------------------------------------------------------------------------
+ 284  416C              ;
+ 285  416C              ; Timer interrupt routine, it will be called on each timer interrupt
+ 286  416C              ; (at 50 or 60Hz), but only if DRV_INIT returns Cy=1 on its first execution.
+ 287  416C
+ 288  416C              DRV_TIMI:
+ 289  416C C9           	ret
+ 290  416D
+ 291  416D              ;-----------------------------------------------------------------------------
+ 292  416D              ;
+ 293  416D              ; Driver initialization routine, it is called twice:
+ 294  416D              ;
+ 295  416D              ; 1) First execution, for information gathering.
+ 296  416D              ;    Input:
+ 297  416D              ;      A = 0
+ 298  416D              ;      B = number of available drives
+ 299  416D              ;      HL = maximum size of allocatable work area in page 3
+ 300  416D              ;    Output:
+ 301  416D              ;      A = number of required drives (for drive-based driver only)
+ 302  416D              ;      HL = size of required work area in page 3
+ 303  416D              ;      Cy = 1 if DRV_TIMI must be hooked to the timer interrupt, 0 otherwise
+ 304  416D              ;
+ 305  416D              ; 2) Second execution, for work area and hardware initialization.
+ 306  416D              ;    Input:
+ 307  416D              ;      A = 1
+ 308  416D              ;      B = number of allocated drives for this controller
+ 309  416D              ;
+ 310  416D              ;    The work area address can be obtained by using GWORK.
+ 311  416D              ;
+ 312  416D              ;    If first execution requests more work area than available,
+ 313  416D              ;    second execution will not be done and DRV_TIMI will not be hooked
+ 314  416D              ;    to the timer interrupt.
+ 315  416D              ;
+ 316  416D              ;    If first execution requests more drives than available,
+ 317  416D              ;    as many drives as possible will be allocated, and the initialization
+ 318  416D              ;    procedure will continue the normal way
+ 319  416D              ;    (for drive-based drivers only. Device-based drivers always
+ 320  416D              ;     get two allocated drives.)
+ 321  416D
+ 322  416D              DRV_INIT:
+ 323  416D B7           	or	a		; testar se eh primeira ou segunda chamada
+ 324  416E CA F0 41     	jp	z, .primeira_chamada
+ 325  4171
+ 326  4171              ; 2. chamada:
+ 327  4171 CD 6C 00     	call	BIOS_INITXT	; inicializar tela
+ 328  4174 AF           	xor	a
+ 329  4175 CD C3 00     	call	BIOS_CLS	; limpar tela
+ 330  4178 11 DA 47     	ld	de, strTitulo	; imprimir titulo
+ 331  417B CD 90 46     	call	printString
+ 332  417E               IF 0 = 0
+ 333  417E AF           	xor	a
+ 334  417F 32 39 70     	ld	(WRKAREA.FLAGS), a
+ 335  4182               ENDIF
+ 336  4182 11 2F 48     	ld	de, strCartao
+ 337  4185 CD 90 46     	call	printString
+ 338  4188 DB 9E        	in	a, (PORTSTATUS)	; Is there an SD Card in the slot?
+ 339  418A E6 02        	and	$2
+ 340  418C 28 0B        	jr	z, .naoVazio
+ 341  418E 11 36 48     	ld	de, strVazio
+ 342  4191 CD 90 46     	call	printString
+ 343  4194               IF 0 = 0
+ 344  4194 CD 7D 43      	call	marcaErroCartao
+ 345  4197               ENDIF
+ 346  4197 18 4D        	jr	.wait
+ 347  4199              .naoVazio:
+ 348  4199 CD A6 43     	call	detectaCartao	; tem cartao no slot, inicializar e detectar
+ 349  419C 30 0C        	jr	nc, .detectou
+ 350  419E CD E9 44     	call	desabilitaSDs
+ 351  41A1 11 41 48     	ld	de, strNaoIdentificado
+ 352  41A4 CD 90 46     	call	printString
+ 353  41A7               IF 0 = 1
+ 354  41A7 ~            	ret
+ 355  41A7               ELSE
+ 356  41A7 C3 7D 43     	jp	marcaErroCartao	; slot vazio ou erro de deteccao, marcar nas flags
+ 357  41AA               ENDIF
+ 358  41AA              .detectou:
+ 359  41AA CD 86 43     	call	calculaCIDoffset
+ 360  41AD DD 7E 0F     	ld	a, (ix+15)	; pegar byte SDV1 ou SDV2
+ 361  41B0 11 56 48     	ld	de, strSDV1	; e imprimir
+ 362  41B3 B7           	or	a
+ 363  41B4 28 03        	jr	z, .pula1
+ 364  41B6 11 5E 48     	ld	de, strSDV2
+ 365  41B9              .pula1:
+ 366  41B9 CD 90 46     	call	printString
+ 367  41BC 3E 28        	ld	a, '('
+ 368  41BE CD A2 00     	call	BIOS_CHPUT
+ 369  41C1 DD 7E 00     	ld	a, (ix)		; pegar byte do fabricante
+ 370  41C4 CD E1 46     	call	printDecToAscii	; Imprimir Manufacturer ID
+ 371  41C7 3E 29        	ld	a, ')'
+ 372  41C9 CD A2 00     	call	BIOS_CHPUT
+ 373  41CC 3E 20        	ld	a, ' '
+ 374  41CE CD A2 00     	call	BIOS_CHPUT
+ 375  41D1 DD 7E 00     	ld	a, (ix)		; pegar byte do fabricante
+ 376  41D4 CD 0D 47     	call	pegaFabricante	; achar nome do fabricante
+ 377  41D7 EB           	ex	de, hl
+ 378  41D8 CD 90 46     	call	printString	; e imprimir
+ 379  41DB 11 2C 48     	ld	de, strCrLf
+ 380  41DE CD 90 46     	call	printString
+ 381  41E1 01 00 00     	ld	bc, 0
+ 382  41E4 1E 02        	ld	e, 2
+ 383  41E6              .wait:				; esperar um pouco para dar tempo
+ 384  41E6 00           	nop			; de ler mensagens
+ 385  41E7 0B           	dec	bc
+ 386  41E8 79           	ld	a, c
+ 387  41E9 B0           	or	b
+ 388  41EA 20 FA        	jr	nz, .wait
+ 389  41EC 1D           	dec	e
+ 390  41ED 20 F7        	jr	nz, .wait
+ 391  41EF C9           	ret
+ 392  41F0
+ 393  41F0              .primeira_chamada:
+ 394  41F0 AF           	xor	a		; primeira chamada do Nextor
+ 395  41F1 21 00 00     	ld	hl, 0		; informar que nao precisamos de RAM
+ 396  41F4 C9           	ret
+ 397  41F5
+ 398  41F5              ;-----------------------------------------------------------------------------
+ 399  41F5              ;
+ 400  41F5              ; Obtain driver version
+ 401  41F5              ;
+ 402  41F5              ; Input:  -
+ 403  41F5              ; Output: A = Main version number
+ 404  41F5              ;         B = Secondary version number
+ 405  41F5              ;         C = Revision number
+ 406  41F5
+ 407  41F5              DRV_VERSION:
+ 408  41F5 3E 01        	ld	a,VER_MAIN
+ 409  41F7 06 00        	ld	b,VER_SEC
+ 410  41F9 0E 00        	ld	c,VER_REV
+ 411  41FB C9           	ret
+ 412  41FC
+ 413  41FC              ;-----------------------------------------------------------------------------
+ 414  41FC              ;
+ 415  41FC              ; BASIC expanded statement ("CALL") handler.
+ 416  41FC              ; Works the expected way, except that if invoking CALBAS is needed,
+ 417  41FC              ; it must be done via the CALLB0 routine in kernel page 0.
+ 418  41FC
+ 419  41FC              DRV_BASSTAT:
+ 420  41FC 37           	scf
+ 421  41FD C9           	ret
+ 422  41FE
+ 423  41FE              ;-----------------------------------------------------------------------------
+ 424  41FE              ;
+ 425  41FE              ; BASIC expanded device handler.
+ 426  41FE              ; Works the expected way, except that if invoking CALBAS is needed,
+ 427  41FE              ; it must be done via the CALLB0 routine in kernel page 0.
+ 428  41FE
+ 429  41FE              DRV_BASDEV:
+ 430  41FE 37           	scf
+ 431  41FF C9           	ret
+ 432  4200
+ 433  4200
+ 434  4200              ;-----------------------------------------------------------------------------
+ 435  4200              ;
+ 436  4200              ; Extended BIOS hook.
+ 437  4200              ; Works the expected way, except that it must return
+ 438  4200              ; D'=1 if the old hook must be called, D'=0 otherwise.
+ 439  4200              ; It is entered with D'=1.
+ 440  4200
+ 441  4200              DRV_EXTBIO:
+ 442  4200 C9           	ret
+ 443  4201
+ 444  4201
+ 445  4201              ;-----------------------------------------------------------------------------
+ 446  4201              ;
+ 447  4201              ; Direct calls entry points.
+ 448  4201              ; Calls to addresses 7850h, 7853h, 7856h, 7859h and 785Ch
+ 449  4201              ; in kernel banks 0 and 3 will be redirected
+ 450  4201              ; to DIRECT0/1/2/3/4 respectively.
+ 451  4201              ; Receives all register data from the caller except IX and AF'.
+ 452  4201
+ 453  4201              DRV_DIRECT0:
+ 454  4201              DRV_DIRECT1:
+ 455  4201              DRV_DIRECT2:
+ 456  4201              DRV_DIRECT3:
+ 457  4201              DRV_DIRECT4:
+ 458  4201 C9           	ret
+ 459  4202
+ 460  4202
+ 461  4202              ;=====
+ 462  4202              ;=====  BEGIN of DEVICE-BASED specific routines
+ 463  4202              ;=====
+ 464  4202
+ 465  4202              ;-----------------------------------------------------------------------------
+ 466  4202              ;
+ 467  4202              ; Read or write logical sectors from/to a logical unit
+ 468  4202              ;
+ 469  4202              ;Input:    Cy=0 to read, 1 to write
+ 470  4202              ;          A = Device number, 1 to 7
+ 471  4202              ;          B = Number of sectors to read or write
+ 472  4202              ;          C = Logical unit number, 1 to 7
+ 473  4202              ;          HL = Source or destination memory address for the transfer
+ 474  4202              ;          DE = Address where the 4 byte sector number is stored.
+ 475  4202              ;Output:   A = Error code (the same codes of MSX-DOS are used):
+ 476  4202              ;              0: Ok
+ 477  4202              ;              .IDEVL: Invalid device or LUN
+ 478  4202              ;              .NRDY: Not ready
+ 479  4202              ;              .DISK: General unknown disk error
+ 480  4202              ;              .DATA: CRC error when reading
+ 481  4202              ;              .RNF: Sector not found
+ 482  4202              ;              .UFORM: Unformatted disk
+ 483  4202              ;              .WPROT: Write protected media, or read-only logical unit
+ 484  4202              ;              .WRERR: Write error
+ 485  4202              ;              .NCOMP: Incompatible disk.
+ 486  4202              ;              .SEEK: Seek error.
+ 487  4202              ;          B = Number of sectors actually read (in case of error only)
+ 488  4202
+ 489  4202              DEV_RW:
+ 490  4202 F5           	push	af
+ 491  4203 FE 02        	cp	2		; somente 1 dispositivo
+ 492  4205 30 03        	jr	nc, .saicomerroidl
+ 493  4207 0D           	dec	c		; somente 1 logical unit
+ 494  4208 28 0C        	jr	z, .ok
+ 495  420A              .saicomerroidl:
+ 496  420A F1           	pop	af		; retira AF guardado no inicio
+ 497  420B 3E B5        	ld	a, EIDEVL	; informar erro
+ 498  420D 06 00        	ld	b, 0
+ 499  420F C9           	ret
+ 500  4210               IF 0 = 0
+ 501  4210              .errornr:
+ 502  4210 F1           	pop	af		; retira AF guardado no inicio
+ 503  4211 3E FC        	ld	a, ENRDY	; Not ready
+ 504  4213              ;	ld	a, EDISK	; General unknown disk error
+ 505  4213 06 00        	ld	b, 0
+ 506  4215 C9           	ret
+ 507  4216               ENDIF
+ 508  4216              .ok:
+ 509  4216               IF 0 = 0
+ 510  4216 CD 72 43     	call	checkSWDS
+ 511  4219 38 F5        	jr	c, .errornr
+ 512  421B               ENDIF
+ 513  421B 78            	ld	a, b
+ 514  421C 32 31 70     	ld	(WRKAREA.NUMBLOCKS), a	; guarda numero de blocos para ler/gravar
+ 515  421F E5           	push	hl
+ 516  4220 CD 86 43     	call	calculaCIDoffset	; calculamos em IX a posicao correta do offset CID dependendo do cartao atual
+ 517  4223 E1           	pop	hl
+ 518  4224 F1           	pop	af		; retira AF guardado no inicio, para saber se eh leitura ou escrita
+ 519  4225 38 1F        	jr	c, escrita	; se for escrita pulamos
+ 520  4227              leitura:
+ 521  4227 1A           	ld	a, (de)		; 1. n. bloco
+ 522  4228 F5           	push	af
+ 523  4229 13           	inc	de
+ 524  422A 1A           	ld	a, (de)		; 2. n. bloco
+ 525  422B F5           	push	af
+ 526  422C 13           	inc	de
+ 527  422D 1A           	ld	a, (de)		; 3. n. bloco
+ 528  422E 4F           	ld	c, a
+ 529  422F 13           	inc	de
+ 530  4230 1A           	ld	a, (de)		; 4. n. bloco
+ 531  4231 13           	inc	de
+ 532  4232 47           	ld	b, a
+ 533  4233 F1           	pop	af
+ 534  4234 57           	ld	d, a
+ 535  4235 F1           	pop	af		; HL = ponteiro destino
+ 536  4236 5F           	ld	e, a		; BC DE = 32 bits numero do bloco
+ 537  4237 CD 28 46     	call	LerBloco	; chamar rotina de leitura de dados
+ 538  423A 30 08        	jr	nc, .ok
+ 539  423C               IF 0 = 0
+ 540  423C CD 7D 43     	call	marcaErroCartao	; ocorreu erro na leitura, marcar erro
+ 541  423F               ENDIF
+ 542  423F              ;	ld	a, ENRDY	; Not ready
+ 543  423F 3E FD        	ld	a, EDISK	; General unknown disk error
+ 544  4241 06 00        	ld	b, 0		; informar que lemos 0 blocos
+ 545  4243 C9           	ret
+ 546  4244              .ok:
+ 547  4244 AF           	xor	a		; tudo OK, informar ao Nextor
+ 548  4245 C9           	ret
+ 549  4246
+ 550  4246              escrita:
+ 551  4246 DB 9E        	in	a, (PORTSTATUS)	; destructive read
+ 552  4248 E6 04        	and	$4		; test if the card is write protected
+ 553  424A 28 05        	jr	z, .ok
+ 554  424C 3E F8        	ld	a, EWPROT	; write protect
+ 555  424E 06 00        	ld	b, 0		; 0 blocks were written
+ 556  4250 C9           	ret
+ 557  4251              .ok:
+ 558  4251 1A           	ld	a, (de)		; 1. n. bloco
+ 559  4252 F5           	push	af
+ 560  4253 13           	inc	de
+ 561  4254 1A           	ld	a, (de)		; 2. n. bloco
+ 562  4255 F5           	push	af
+ 563  4256 13           	inc	de
+ 564  4257 1A           	ld	a, (de)		; 3. n. bloco
+ 565  4258 13           	inc	de
+ 566  4259 4F           	ld	c, a
+ 567  425A 1A           	ld	a, (de)		; 4. n. bloco
+ 568  425B 13           	inc	de
+ 569  425C 47           	ld	b, a
+ 570  425D F1           	pop	af
+ 571  425E 57           	ld	d, a
+ 572  425F F1           	pop	af		; HL = ponteiro destino
+ 573  4260 5F           	ld	e, a		; BC DE = 32 bits numero do bloco
+ 574  4261 CD 82 45     	call	GravarBloco	; chamar rotina de gravacao de dados
+ 575  4264 30 08        	jr	nc, .ok2
+ 576  4266               IF 0 = 0
+ 577  4266 CD 7D 43     	call	marcaErroCartao	; ocorreu erro, marcar nas flags
+ 578  4269               ENDIF
+ 579  4269 3E FE        	ld	a, EWRERR	; Write error
+ 580  426B 06 00        	ld	b, 0
+ 581  426D C9           	ret
+ 582  426E              .ok2:
+ 583  426E AF           	xor	a		; gravacao sem erros!
+ 584  426F C9           	ret
+ 585  4270
+ 586  4270              ;-----------------------------------------------------------------------------
+ 587  4270              ;
+ 588  4270              ; Device information gathering
+ 589  4270              ;
+ 590  4270              ;Input:   A = Device index, 1 to 7
+ 591  4270              ;         B = Information to return:
+ 592  4270              ;             0: Basic information
+ 593  4270              ;             1: Manufacturer name string
+ 594  4270              ;             2: Device name string
+ 595  4270              ;             3: Serial number string
+ 596  4270              ;         HL = Pointer to a buffer in RAM
+ 597  4270              ;Output:  A = Error code:
+ 598  4270              ;             0: Ok
+ 599  4270              ;             1: Device not available or invalid device index
+ 600  4270              ;             2: Information not available, or invalid information index
+ 601  4270              ;         When basic information is requested,
+ 602  4270              ;         buffer filled with the following information:
+ 603  4270              ;
+ 604  4270              ;+0 (1): Numer of logical units, from 1 to 7. 1 if the device has no logical
+ 605  4270              ;        units (which is functionally equivalent to having only one).
+ 606  4270              ;+1 (1): Device flags, always zero in Beta 2.
+ 607  4270              ;
+ 608  4270              ; The strings must be printable ASCII string (ASCII codes 32 to 126),
+ 609  4270              ; left justified and padded with spaces. All the strings are optional,
+ 610  4270              ; if not available, an error must be returned.
+ 611  4270              ; If a string is provided by the device in binary format, it must be reported
+ 612  4270              ; as an hexadecimal, upper-cased string, preceded by the prefix "0x".
+ 613  4270              ; The maximum length for a string is 64 characters;
+ 614  4270              ; if the string is actually longer, the leftmost 64 characters
+ 615  4270              ; should be provided.
+ 616  4270              ;
+ 617  4270              ; In the case of the serial number string, the same rules for the strings
+ 618  4270              ; apply, except that it must be provided right-justified,
+ 619  4270              ; and if it is too long, the rightmost characters must be
+ 620  4270              ; provided, not the leftmost.
+ 621  4270
+ 622  4270              DEV_INFO: ; MisterVersion Only Returns Basic Information
+ 623  4270 FE 02        	cp	2		; somente 1 dispositivo
+ 624  4272 38 03        	jr	c, .ok
+ 625  4274              .saicomerro:
+ 626  4274 3E 01        	ld	a, 1		; informar erro
+ 627  4276 C9           	ret
+ 628  4277              .ok:
+ 629  4277 78               ld a, b
+ 630  4278 B7               or a
+ 631  4279 28 03            jr z, .basic
+ 632  427B C3 74 42         jp .saicomerro
+ 633  427E              .basic:
+ 634  427E               ; Basic information:
+ 635  427E 3E 01        	ld	a, 1		; 1 logical unit somente
+ 636  4280 77           	ld	(hl), a
+ 637  4281 AF           	xor	a		; reservado, deve ser 0
+ 638  4282 23           	inc	hl
+ 639  4283 77           	ld	(hl), a
+ 640  4284 C9           	ret			; retorna com A=0 (OK)
+ 641  4285
+ 642  4285              DEV_INFO2:
+ 643  4285 04           	inc	b ; Mister Deberia ser Dec??
+ 644  4286 FE 02        	cp	2		; somente 1 dispositivo
+ 645  4288 38 03        	jr	c, .ok
+ 646  428A              .saicomerro:
+ 647  428A 3E 01        	ld	a, 1		; informar erro
+ 648  428C C9           	ret
+ 649  428D              .ok:
+ 650  428D               IF 0 = 0
+ 651  428D CD 72 43     	call	checkSWDS
+ 652  4290 38 F8        	jr	c, .saicomerro
+ 653  4292               ENDIF
+ 654  4292 10 07        	djnz	.naoBasic
+ 655  4294              ; Basic information:
+ 656  4294 3E 01        	ld	a, 1		; 1 logical unit somente
+ 657  4296 77           	ld	(hl), a
+ 658  4297 AF           	xor	a		; reservado, deve ser 0
+ 659  4298 23           	inc	hl
+ 660  4299 77           	ld	(hl), a
+ 661  429A C9           	ret			; retorna com A=0 (OK)
+ 662  429B
+ 663  429B              .naoBasic:
+ 664  429B E5           	push	hl
+ 665  429C CD 86 43     	call	calculaCIDoffset	; calculamos em IX a posicao correta do offset CID dependendo do cartao atual
+ 666  429F E1           	pop	hl
+ 667  42A0 10 25        	djnz	.naoManuf
+ 668  42A2              ; Manufacturer Name:
+ 669  42A2 E5           	push	hl		; salva ponteiro do buffer
+ 670  42A3 06 40        	ld	b, 64		; preenche buffer com espaco
+ 671  42A5 3E 20        	ld	a, ' '
+ 672  42A7              .loop1:
+ 673  42A7 77           	ld	(hl), a
+ 674  42A8 23           	inc	hl
+ 675  42A9 10 FC        	djnz	.loop1
+ 676  42AB D1           	pop	de		; recuperamos ponteiro do buffer em DE
+ 677  42AC 3E 28        	ld	a, '('		; colocamos (xx) xxx no buffer
+ 678  42AE 12           	ld	(de), a
+ 679  42AF 13           	inc	de
+ 680  42B0 DD 7E 00     	ld	a, (ix)		; byte do fabricante
+ 681  42B3 CD 99 46     	call	DecToAscii
+ 682  42B6 3E 29        	ld	a, ')'
+ 683  42B8 12           	ld	(de), a
+ 684  42B9 13           	inc	de
+ 685  42BA 3E 20        	ld	a, ' '
+ 686  42BC 12           	ld	(de), a
+ 687  42BD 13           	inc	de
+ 688  42BE DD 7E 00     	ld	a, (ix)		; byte do fabricante
+ 689  42C1 CD 0D 47     	call	pegaFabricante	; pegar nome do fabricante em HL
+ 690  42C4 ED B0        	ldir			; e colocar no buffer
+ 691  42C6 C9           	ret
+ 692  42C7
+ 693  42C7              .naoManuf:
+ 694  42C7 10 1A        	djnz	.naoProduct
+ 695  42C9              ; Product Name:
+ 696  42C9 E5           	push	hl		; guarda HL que aponta para buffer do Nextor
+ 697  42CA DD E5        	push	ix
+ 698  42CC E1           	pop	hl		; joga IX para HL
+ 699  42CD 16 00        	ld	d, 0
+ 700  42CF 1E 03        	ld	e, 3		; adiciona offset do productname em HL
+ 701  42D1 19           	add	hl, de
+ 702  42D2 D1           	pop	de		; recupera buffer do Nextor em DE
+ 703  42D3 01 05 00     	ld	bc, 5		; 5 caracteres
+ 704  42D6 ED B0        	ldir			; copia nome do produto
+ 705  42D8 EB           	ex	de, hl		; troca DE com HL, agora HL aponta para Buffer do nextor atualizado
+ 706  42D9 06 3B        	ld	b, 59		; Coloca espaco no restante do buffer
+ 707  42DB 3E 20        	ld	a, ' '
+ 708  42DD              .loop2:
+ 709  42DD 77           	ld	(hl), a
+ 710  42DE 23           	inc	hl
+ 711  42DF 10 FC        	djnz	.loop2
+ 712  42E1 AF           	xor	a		; informar sem erros
+ 713  42E2 C9           	ret
+ 714  42E3
+ 715  42E3              .naoProduct:
+ 716  42E3              ; Serial:
+ 717  42E3 3E 30        	ld	a, '0'		; Coloca prefixo "0x"
+ 718  42E5 77           	ld	(hl), a
+ 719  42E6 23           	inc	hl
+ 720  42E7 3E 78        	ld	a, 'x'
+ 721  42E9 77           	ld	(hl), a
+ 722  42EA 23           	inc	hl
+ 723  42EB E5           	push	hl		; guarda HL que aponta para buffer do Nextor
+ 724  42EC DD E5        	push	ix
+ 725  42EE E1           	pop	hl		; joga IX para HL
+ 726  42EF 16 00        	ld	d, 0
+ 727  42F1 1E 09        	ld	e, 9		; adiciona offset do productname em HL
+ 728  42F3 19           	add	hl, de
+ 729  42F4 D1           	pop	de		; recupera buffer do nextor em DE
+ 730  42F5 06 04        	ld	b, 4		; 4 bytes do serial
+ 731  42F7              .loop3:
+ 732  42F7 7E           	ld	a, (hl)
+ 733  42F8 CD CD 46     	call	HexToAscii	; converter HEXA para ASCII
+ 734  42FB 23           	inc	hl
+ 735  42FC 10 F9        	djnz	.loop3
+ 736  42FE 06 36        	ld	b, 54		; Coloca espaco no restante
+ 737  4300 3E 20        	ld	a, ' '
+ 738  4302              .loop4:
+ 739  4302 12           	ld	(de), a
+ 740  4303 13           	inc	de
+ 741  4304 10 FC        	djnz	.loop4
+ 742  4306 AF           	xor	a		; informar sem erros
+ 743  4307 C9           	ret
+ 744  4308
+ 745  4308              ;-----------------------------------------------------------------------------
+ 746  4308              ;
+ 747  4308              ; Obtain device status
+ 748  4308              ;
+ 749  4308              ;Input:   A = Device index, 1 to 7
+ 750  4308              ;         B = Logical unit number, 1 to 7
+ 751  4308              ;             0 to return the status of the device itself.
+ 752  4308              ;Output:  A = Status for the specified logical unit,
+ 753  4308              ;             or for the whole device if 0 was specified:
+ 754  4308              ;                0: The device or logical unit is not available, or the
+ 755  4308              ;                   device or logical unit number supplied is invalid.
+ 756  4308              ;                1: The device or logical unit is available and has not
+ 757  4308              ;                   changed since the last status request.
+ 758  4308              ;                2: The device or logical unit is available and has changed
+ 759  4308              ;                   since the last status request
+ 760  4308              ;                   (for devices, the device has been unplugged and a
+ 761  4308              ;                    different device has been plugged which has been
+ 762  4308              ;                    assigned the same device index; for logical units,
+ 763  4308              ;                    the media has been changed).
+ 764  4308              ;                3: The device or logical unit is available, but it is not
+ 765  4308              ;                   possible to determine whether it has been changed
+ 766  4308              ;                   or not since the last status request.
+ 767  4308              ;
+ 768  4308              ; Devices not supporting hot-plugging must always return status value 1.
+ 769  4308              ; Non removable logical units may return values 0 and 1.
+ 770  4308              ;
+ 771  4308              ; The returned status is always relative to the previous invokation of
+ 772  4308              ; DEV_STATUS itself. Please read the Driver Developer Guide for more info.
+ 773  4308
+ 774  4308              DEV_STATUS:
+ 775  4308 FE 02        	cp	2		; 1 dispositivo somente
+ 776  430A 30 28        	jr	nc, .saicomerro
+ 777  430C 05           	dec	b		; 1 logical unit somente
+ 778  430D 20 25        	jr	nz, .saicomerro
+ 779  430F              	;ld	(WRKAREA.NUMSD), a
+ 780  430F C3 28 43         jp  .semMudanca ; Mister : Lo definiremos como no removible, el status siempre sera no changed
+ 781  4312               IF 0 = 0
+ 782  4312 3A 39 70     	ld	a, (WRKAREA.FLAGS)
+ 783  4315 E6 01        	and	1
+ 784  4317 28 0F        	jr	z, .semMudanca
+ 785  4319 CD A6 43     	call	detectaCartao	; try redetect
+ 786  431C 38 13        	jr	c, .cartaoComErro
+ 787  431E 3A 39 70     	ld	a, (WRKAREA.FLAGS)
+ 788  4321 E6 FE        	and	$FE
+ 789  4323 32 39 70     	ld	(WRKAREA.FLAGS), a
+ 790  4326 18 06        	jr	.comMudanca2
+ 791  4328               ELSE
+ 792  4328 ~            	in	a, (PORTSTATUS)	; destructive read
+ 793  4328 ~            	bit	1, a
+ 794  4328 ~            	jr	nz, .saicomerro	; no
+ 795  4328 ~            	bit	0, a		; changed?
+ 796  4328 ~            	jr	nz, .comMudanca	; no
+ 797  4328               ENDIF
+ 798  4328              .semMudanca:
+ 799  4328 3E 01        	ld	a, 1		; informa ao Nextor que cartao esta OK e nao mudou
+ 800  432A C9           	ret
+ 801  432B              .comMudanca:
+ 802  432B CD A6 43     	call	detectaCartao	; try redetect
+ 803  432E              .comMudanca2
+ 804  432E 3E 02        	ld	a, 2		; informa ao Nextor que cartao esta OK e mudou
+ 805  4330 C9           	ret
+ 806  4331               IF 0 = 0
+ 807  4331              .cartaoComErro:
+ 808  4331 CD 7D 43     	call	marcaErroCartao	; marcar erro do cartao nas flags
+ 809  4334               ENDIF
+ 810  4334              .saicomerro:
+ 811  4334 AF           	xor	a		; informa erro
+ 812  4335 C9           	ret
+ 813  4336
+ 814  4336              ;-----------------------------------------------------------------------------
+ 815  4336              ;
+ 816  4336              ; Obtain logical unit information
+ 817  4336              ;
+ 818  4336              ;Input:   A  = Device index, 1 to 7
+ 819  4336              ;         B  = Logical unit number, 1 to 7
+ 820  4336              ;         HL = Pointer to buffer in RAM.
+ 821  4336              ;Output:  A = 0: Ok, buffer filled with information.
+ 822  4336              ;             1: Error, device or logical unit not available,
+ 823  4336              ;                or device index or logical unit number invalid.
+ 824  4336              ;         On success, buffer filled with the following information:
+ 825  4336              ;
+ 826  4336              ;+0 (1): Medium type:
+ 827  4336              ;        0: Block device
+ 828  4336              ;        1: CD or DVD reader or recorder
+ 829  4336              ;        2-254: Unused. Additional codes may be defined in the future.
+ 830  4336              ;        255: Other
+ 831  4336              ;+1 (2): Sector size, 0 if this information does not apply or is
+ 832  4336              ;        not available.
+ 833  4336              ;+3 (4): Total number of available sectors.
+ 834  4336              ;        0 if this information does not apply or is not available.
+ 835  4336              ;+7 (1): Flags:
+ 836  4336              ;        bit 0: 1 if the medium is removable.
+ 837  4336              ;        bit 1: 1 if the medium is read only. A medium that can dinamically
+ 838  4336              ;               be write protected or write enabled is not considered
+ 839  4336              ;               to be read-only.
+ 840  4336              ;        bit 2: 1 if the LUN is a floppy disk drive.
+ 841  4336              ;+8 (2): Number of cylinders
+ 842  4336              ;+10 (1): Number of heads
+ 843  4336              ;+11 (1): Number of sectors per track
+ 844  4336              ;
+ 845  4336              ; Number of cylinders, heads and sectors apply to hard disks only.
+ 846  4336              ; For other types of device, these fields must be zero.
+ 847  4336
+ 848  4336              LUN_INFO:
+ 849  4336 FE 02        	cp	2		; somente 1 dispositivo
+ 850  4338 30 03        	jr	nc, .saicomerro
+ 851  433A 05           	dec	b		; somente 1 logical unit
+ 852  433B 28 03        	jr	z, .ok
+ 853  433D              .saicomerro:
+ 854  433D 3E 01        	ld	a, 1		; informar erro
+ 855  433F C9           	ret
+ 856  4340              .ok:
+ 857  4340               IF 0 = 0
+ 858  4340 CD 72 43     	call	checkSWDS
+ 859  4343 38 F8        	jr	c, .saicomerro
+ 860  4345               ENDIF
+ 861  4345 E5           	push	hl
+ 862  4346 CD 96 43     	call	calculaBLOCOSoffset	; calcular em IX e HL o offset correto do buffer que armazena total de blocos
+ 863  4349 E1           	pop	hl		; do cartao dependendo do cartao atual solicitado
+ 864  434A AF           	xor	a
+ 865  434B 77           	ld	(hl), a		; Informar que o dispositivo eh do tipo block device
+ 866  434C 23           	inc	hl
+ 867  434D 77           	ld	(hl), a		; tamanho de um bloco = 512 bytes (coloca $00, $02 que é $200 = 512)
+ 868  434E 23           	inc	hl
+ 869  434F 3E 02        	ld	a, 2
+ 870  4351 77           	ld	(hl), a
+ 871  4352 23           	inc	hl
+ 872  4353 DD 7E 00     	ld	a, (ix)		; copia numero de blocos total
+ 873  4356 77           	ld	(hl), a
+ 874  4357 23           	inc	hl
+ 875  4358 DD 7E 01     	ld	a, (ix+1)
+ 876  435B 77           	ld	(hl), a
+ 877  435C 23           	inc	hl
+ 878  435D DD 7E 02     	ld	a, (ix+2)
+ 879  4360 77           	ld	(hl), a
+ 880  4361 23           	inc	hl
+ 881  4362 AF           	xor	a		; cartoes SD tem total de blocos em 24 bits, mas o Nextor pede numero de
+ 882  4363 77           	ld	(hl), a 	; 32 bits, entao coloca 0 no MSB
+ 883  4364 23           	inc	hl
+ 884  4365 3E 00        	ld	a, 0;1		; flags: dispositivo R/W removivel Mister -> R/W Not Removable
+ 885  4367 77           	ld	(hl), a
+ 886  4368 23           	inc	hl
+ 887  4369 AF           	xor	a		; CHS = 0
+ 888  436A 77           	ld	(hl), a
+ 889  436B 23           	inc	hl
+ 890  436C 77           	ld	(hl), a
+ 891  436D 23           	inc	hl
+ 892  436E 77           	ld	(hl), a
+ 893  436F 23           	inc	hl
+ 894  4370 AF           	xor	a		; informar que dados foram preenchidos
+ 895  4371 C9           	ret
+ 896  4372
+ 897  4372              ;=====
+ 898  4372              ;=====  END of DEVICE-BASED specific routines
+ 899  4372              ;=====
+ 900  4372
+ 901  4372              ;------------------------------------------------
+ 902  4372              ; Rotinas auxiliares
+ 903  4372              ;------------------------------------------------
+ 904  4372
+ 905  4372              ;------------------------------------------------
+ 906  4372              ; Testa se cartao esta inserido e/ou houve erro
+ 907  4372              ; na ultima vez que foi acessado. Carry indica
+ 908  4372              ; erro
+ 909  4372              ; Destroi AF
+ 910  4372              ;------------------------------------------------
+ 911  4372
+ 912  4372               IF 0 = 0
+ 913  4372              checkSWDS:
+ 914  4372 3A 39 70     	ld	a, (WRKAREA.FLAGS)	; testar bit de erro do cartao nas flags
+ 915  4375 E6 01        	and	1
+ 916  4377 28 02        	jr	z, .ok
+ 917  4379 37           	scf			; indica erro
+ 918  437A C9           	ret
+ 919  437B              .ok:
+ 920  437B AF           	xor	a		; zera carry indicando sem erro
+ 921  437C C9           	ret
+ 922  437D
+ 923  437D              ;------------------------------------------------
+ 924  437D              ; Marcar bit de erro nas flags
+ 925  437D              ; Destroi AF, C
+ 926  437D              ;------------------------------------------------
+ 927  437D              marcaErroCartao:
+ 928  437D 3A 39 70     	ld	a, (WRKAREA.FLAGS)	; marcar erro
+ 929  4380 F6 01        	or	1
+ 930  4382 32 39 70     	ld	(WRKAREA.FLAGS), a
+ 931  4385 C9           	ret
+ 932  4386
+ 933  4386               ENDIF
+ 934  4386
+ 935  4386              ;------------------------------------------------
+ 936  4386              ; Calcula offset do buffer na RAM em HL e IX para
+ 937  4386              ; os dados do CID dependendo do cartao atual
+ 938  4386              ; Destroi AF, DE, HL e IX
+ 939  4386              ;------------------------------------------------
+ 940  4386              calculaCIDoffset:
+ 941  4386 21 10 70     	ld	hl, WRKAREA.BCID1
+ 942  4389 3A 30 70     	ld	a, (WRKAREA.NUMSD)
+ 943  438C 3D           	dec	a
+ 944  438D 28 03        	jr	z, .c1
+ 945  438F 21 20 70     	ld	hl, WRKAREA.BCID2
+ 946  4392              .c1:
+ 947  4392 E5           	push	hl
+ 948  4393 DD E1        	pop	ix		; vamos colocar HL em IX
+ 949  4395 C9           	ret
+ 950  4396
+ 951  4396              ;------------------------------------------------
+ 952  4396              ; Calcula offset do buffer na RAM para os dados
+ 953  4396              ; do total de blocos dependendo do cartao atual
+ 954  4396              ; Offset fica em HL e IX
+ 955  4396              ; Destroi AF, DE, HL e IX
+ 956  4396              ;------------------------------------------------
+ 957  4396              calculaBLOCOSoffset:
+ 958  4396 21 32 70     	ld	hl, WRKAREA.BLOCKS1
+ 959  4399 3A 30 70     	ld	a, (WRKAREA.NUMSD)
+ 960  439C 3D           	dec	a
+ 961  439D 28 03        	jr	z, .c1
+ 962  439F 21 35 70     	ld	hl, WRKAREA.BLOCKS2
+ 963  43A2              .c1:
+ 964  43A2 E5           	push	hl
+ 965  43A3 DD E1        	pop	ix		; Vamos colocar HL em IX
+ 966  43A5 C9           	ret
+ 967  43A6
+ 968  43A6
+ 969  43A6              ;------------------------------------------------
+ 970  43A6              ; Minhas funcoes para cartao SD
+ 971  43A6              ;------------------------------------------------
+ 972  43A6
+ 973  43A6              ;------------------------------------------------
+ 974  43A6              ; Processo de inicializacao e deteccao do cartao.
+ 975  43A6              ; Detecta se cartao responde, qual versao (SDV1
+ 976  43A6              ; ou SDV2), faz a leitura do CSD e CID e calcula
+ 977  43A6              ; o numero de blocos do cartao, colocando o CID
+ 978  43A6              ; e total de blocos no buffer correto dependendo
+ 979  43A6              ; do cartao 1 ou 2.
+ 980  43A6              ; Retorna erro no carry. Se for 0 indica deteccao
+ 981  43A6              ; com sucesso.
+ 982  43A6              ; Destroi todos os registradores
+ 983  43A6              ;------------------------------------------------
+ 984  43A6              detectaCartao:
+ 985  43A6 CD CB 44     	call	iniciaSD	; manda pulsos de clock e comandos iniciais
+ 986  43A9 D8           	ret	c		; retorna se erro
+ 987  43AA CD 85 44     	call	testaSDCV2	; tenta inicializar um cartao SDV2
+ 988  43AD D8           	ret	c
+ 989  43AE              ;	ld	hl, WRKAREA.BCSD
+ 990  43AE              ;	ld	a, CMD9		; ler CSD
+ 991  43AE              ;	call	lerBlocoCxD
+ 992  43AE              ;	ret	c
+ 993  43AE
+ 994  43AE CD 86 43     	call	calculaCIDoffset	; calculamos em IX e HL a posicao correta do offset CID dependendo do cartao atual
+ 995  43B1              ;	ld	a, CMD10	; ler CID
+ 996  43B1              ;	call	lerBlocoCxD
+ 997  43B1              ;	ret	c
+ 998  43B1 3E 7A        	ld	a, CMD58	; ler OCR
+ 999  43B3 11 00 00     	ld	de, 0
+1000  43B6 CD 0C 45     	call	SD_SEND_CMD_2_ARGS_GET_R3	; enviar comando e receber resposta tipo R3
+1001  43B9 D8           	ret	c
+1002  43BA 78           	ld	a, b		; testa bit CCS do OCR que informa se cartao eh SDV1 ou SDV2
+1003  43BB E6 40        	and	$40
+1004  43BD
+1005  43BD                  ;Card1
+1006  43BD              ;    ld	hl, WRKAREA.BCID1
+1007  43BD              ;    push hl
+1008  43BD              ;    pop ix
+1009  43BD
+1010  43BD DD 36 03 56      ld	(ix+3), 'V' ;Mister Product Name
+1011  43C1 DD 36 04 68      ld	(ix+4), 'h' ;Mister Product Name
+1012  43C5 DD 36 05 64      ld	(ix+5), 'd' ;Mister Product Name
+1013  43C9 DD 36 06 4D      ld	(ix+6), 'M' ;Mister Product Name
+1014  43CD DD 36 07 69      ld	(ix+7), 'i' ;Mister Product Name
+1015  43D1
+1016  43D1 DD 36 09 0D      ld	(ix+9),  $0D ;Mister SerialNumber
+1017  43D5 DD 36 0A 0E      ld	(ix+10), $0E ;Mister SerialNumber
+1018  43D9 DD 36 0B 0A      ld	(ix+11), $0A ;Mister SerialNumber
+1019  43DD DD 36 0C 0D      ld	(ix+12), $0D ;Mister SerialNumber
+1020  43E1
+1021  43E1
+1022  43E1 DD 36 00 00      ld	(ix), $0 ;Mister VHD ; ID del fabricante
+1023  43E5              ;	ld	a, $0	;Mister VHD ;  0 = V1, 1 = V2  ->  Recogido de OCR que a su vez viene de sd_card ( sdhc(x) ) de la FPGA
+1024  43E5 DD 77 0F     	ld	(ix+15), a	; salva informacao da versao do SD (V1 ou V2) no byte 15 do CID ----- 0 = V1
+1025  43E8
+1026  43E8                  ;Card2
+1027  43E8              ;    ld	hl, WRKAREA.BCID2
+1028  43E8              ;    push hl
+1029  43E8              ;    pop ix
+1030  43E8
+1031  43E8              ;    ld	(ix+3), 'V' ;Mister Product Name
+1032  43E8              ;    ld	(ix+4), 'h' ;Mister Product Name
+1033  43E8              ;    ld	(ix+5), 'd' ;Mister Product Name
+1034  43E8              ;    ld	(ix+6), 'M' ;Mister Product Name
+1035  43E8              ;    ld	(ix+7), 'i' ;Mister Product Name
+1036  43E8
+1037  43E8              ;    ld	(ix+9),  $0D ;Mister SerialNumber
+1038  43E8              ;    ld	(ix+10), $0E ;Mister SerialNumber
+1039  43E8              ;    ld	(ix+11), $0A ;Mister SerialNumber
+1040  43E8              ;    ld	(ix+12), $0D ;Mister SerialNumber
+1041  43E8
+1042  43E8
+1043  43E8              ;    ld	(ix), $0 ;Mister VHD ; ID del fabricante
+1044  43E8              ;	ld	a, $0	;Mister VHD ;  0 = V1, 1 = V2  ->  Recogido de OCR que a su vez viene de sd_card ( sdhc(x) ) de la FPGA
+1045  43E8              ;	ld	(ix+15), a	; salva informacao da versao do SD (V1 ou V2) no byte 15 do CID ----- 0 = V1
+1046  43E8
+1047  43E8 B7               or a
+1048  43E9 CC 7A 44     	call	z, mudarTamanhoBlocoPara512	; se bit CCS do OCR for 1, eh cartao SDV2 (Block address - SDHC ou SDXD) Llama si V1
+1049  43EC D8           	ret	c		; e nao precisamos mudar tamanho do bloco para 512
+1050  43ED
+1051  43ED CD E9 44     	call	desabilitaSDs
+1052  43F0              				; agora vamos calcular o total de blocos dependendo dos dados do CSD
+1053  43F0 CD 96 43     	call	calculaBLOCOSoffset	; calcular em IX e HL o offset correto do buffer que armazena total de blocos
+1054  43F3              ;	ld	hl, WRKAREA.BCSD+5
+1055  43F3              ;	ld	a, (WRKAREA.BCSD)
+1056  43F3              ;	and	$C0		; testa versao do registro CSD
+1057  43F3              ;	jr	z, .calculaCSD1
+1058  43F3              ;	cp	$40
+1059  43F3              ;	jr	z, .calculaCSD2
+1060  43F3
+1061  43F3              ;   Mister VHD
+1062  43F3
+1063  43F3
+1064  43F3 0E 04        	ld	c, $04	 ; 0x4000 Nro de bloques de 512Bytes para el vhd de 128 Megas -> (128*1024*1024)/512 = 2621244 (0x40000)
+1065  43F5 16 00        	ld	d, $00   ;
+1066  43F7 1E 00        	ld	e, $00
+1067  43F9
+1068  43F9                  ;Card1
+1069  43F9              ;    ld	hl, WRKAREA.BLOCKS1
+1070  43F9              ;    push hl
+1071  43F9              ;    pop ix
+1072  43F9
+1073  43F9              ;	ld	(ix+2), c	; colocar no buffer BLOCOS correto a quantidade de blocos
+1074  43F9              ;	ld	(ix+1), d	; que o cartao (1 ou 2) tem
+1075  43F9              ;	ld	(ix), e
+1076  43F9
+1077  43F9                  ;Card2
+1078  43F9              ;    ld	hl, WRKAREA.BLOCKS2
+1079  43F9              ;    push hl
+1080  43F9              ;    pop ix
+1081  43F9
+1082  43F9              ;;	ld	c, $04	 ; 0x4000 Nro de bloques de 512Bytes para el vhd de 128 Megas -> (128*1024*1024)/512 = 2621244 (0x40000)
+1083  43F9              ;;	ld	d, $00   ;
+1084  43F9              ;;	ld	e, $00
+1085  43F9 C3 39 44         jp	.salvaBlocos
+1086  43FC              ;   /Mister VHD
+1087  43FC
+1088  43FC 37           	scf			; versao do registro CSD nao reconhecida, informa erro na deteccao
+1089  43FD C9           	ret
+1090  43FE
+1091  43FE              ; -----------------------------------
+1092  43FE              ; Registro CSD versao 1, calcular da
+1093  43FE              ; maneira correta para a versao 1
+1094  43FE              ; -----------------------------------
+1095  43FE              .calculaCSD1:
+1096  43FE 7E           	ld	a, (hl)
+1097  43FF E6 0F        	and	$0F		; isola READ_BL_LEN
+1098  4401 F5           	push	af
+1099  4402 23           	inc	hl
+1100  4403 7E           	ld	a, (hl)		; 2 primeiros bits de C_SIZE
+1101  4404 E6 03        	and	3
+1102  4406 57           	ld	d, a
+1103  4407 23           	inc	hl
+1104  4408 5E           	ld	e, (hl)		; 8 bits de C_SIZE (DE contem os primeiros 10 bits de C_SIZE)
+1105  4409 23           	inc	hl
+1106  440A 7E           	ld	a, (hl)
+1107  440B E6 C0        	and	$C0		; 2 ultimos bits de C_SIZE
+1108  440D 87           	add	a, a		; rotaciona a esquerda
+1109  440E CB 13        	rl	e		; rotaciona para DE
+1110  4410 CB 12        	rl	d
+1111  4412 87           	add	a, a		; mais uma rotacao
+1112  4413 CB 13        	rl	e		; rotaciona para DE
+1113  4415 CB 12        	rl	d
+1114  4417 13           	inc	de		; agora DE contem todos os 12 bits de C_SIZE, incrementa 1
+1115  4418 23           	inc	hl
+1116  4419 7E           	ld	a, (hl)		; proximo byte
+1117  441A E6 03        	and	3		; 2 bits de C_SIZE_MUL
+1118  441C 47           	ld	b, a		; B contem os 2 bits de C_SIZE_MUL
+1119  441D 23           	inc	hl
+1120  441E 7E           	ld	a, (hl)		; proximo byte
+1121  441F E6 80        	and	$80		; 1 bit de C_SIZE_MUL
+1122  4421 87           	add	a, a		; rotaciona para esquerda jogando no carry
+1123  4422 CB 10        	rl	b		; rotaciona para B
+1124  4424 04           	inc	b		; agora B contem os 3 bits de C_SIZE_MUL
+1125  4425 04           	inc	b		; faz B = C_SIZE_MUL + 2
+1126  4426 F1           	pop	af		; volta em A o READ_BL_LEN
+1127  4427 80           	add	a, b		; A = READ_BL_LEN + (C_SIZE_MUL+2)
+1128  4428 01 00 00     	ld	bc, 0
+1129  442B CD 44 44     	call	.eleva2
+1130  442E 5A           	ld	e, d		; aqui temos 32 bits (BC DE) com o tamanho do cartao
+1131  442F 51           	ld	d, c		; ignoramos os 8 ultimos bits em E, fazemos BC DE => 0B CD (divide por 256)
+1132  4430 48           	ld	c, b
+1133  4431 06 00        	ld	b, 0
+1134  4433 CB 39        	srl	c		; rotacionamos a direita o C, carry = LSB (divide por 2)
+1135  4435 CB 1A        	rr	d		; rotacionamos D e E
+1136  4437 CB 1B        	rr	e		; no final BC DE contem tamanho do cartao / 512 = numero de blocos
+1137  4439              .salvaBlocos:
+1138  4439 DD 71 02     	ld	(ix+2), c	; colocar no buffer BLOCOS correto a quantidade de blocos
+1139  443C DD 72 01     	ld	(ix+1), d	; que o cartao (1 ou 2) tem
+1140  443F DD 73 00     	ld	(ix), e
+1141  4442 AF           	xor	a		; limpa carry
+1142  4443 C9           	ret
+1143  4444
+1144  4444              .eleva2:			; aqui temos: A = (READ_BL_LEN + (C_SIZE_MUL+2))
+1145  4444              				; BC = 0
+1146  4444              				; DE = C_SIZE
+1147  4444 CB 23        	sla	e		; rotacionamos C_SIZE por 'A' vezes
+1148  4446 CB 12        	rl	d
+1149  4448 CB 11        	rl	c
+1150  444A CB 10        	rl	b
+1151  444C 3D           	dec	a		; subtraimos 1
+1152  444D 20 F5        	jr	nz, .eleva2
+1153  444F C9           	ret			; em BC DE temos o tamanho do cartao (bytes) em 32 bits
+1154  4450
+1155  4450              ; -----------------------------------
+1156  4450              ; Registro CSD versao 2, calcular da
+1157  4450              ; maneira correta para a versao 2
+1158  4450              ; -----------------------------------
+1159  4450              .calculaCSD2:
+1160  4450 23           	inc	hl		; HL ja aponta para BCSD+5, fazer HL apontar para BCSD+7
+1161  4451 23           	inc	hl
+1162  4452 7E           	ld	a, (hl)
+1163  4453 E6 3F        	and	$3F
+1164  4455 4F           	ld	c, a
+1165  4456 23           	inc	hl
+1166  4457 56           	ld	d, (hl)
+1167  4458 23           	inc	hl
+1168  4459 5E           	ld	e, (hl)
+1169  445A CD 66 44     	call	.inc32		; soma 1
+1170  445D CD 6E 44     	call	.desloca32	; multiplica por 512
+1171  4460 CD 73 44     	call	.rotaciona24	; multiplica por 2
+1172  4463 C3 39 44     	jp	.salvaBlocos
+1173  4466
+1174  4466              .inc32:
+1175  4466 1C           	inc	e
+1176  4467 C0           	ret	nz
+1177  4468 14           	inc	d
+1178  4469 C0           	ret	nz
+1179  446A 0C           	inc	c
+1180  446B C0           	ret	nz
+1181  446C 04           	inc	b
+1182  446D C9           	ret
+1183  446E
+1184  446E              .desloca32:
+1185  446E 41           	ld	b, c
+1186  446F 4A           	ld	c, d
+1187  4470 53           	ld	d, e
+1188  4471 1E 00        	ld	e, 0
+1189  4473              .rotaciona24:
+1190  4473 CB 22        	sla	d
+1191  4475 CB 11        	rl	c
+1192  4477 CB 10        	rl	b
+1193  4479 C9           	ret
+1194  447A
+1195  447A              ; ------------------------------------------------
+1196  447A              ; Setar o tamanho do bloco para 512 se o cartao
+1197  447A              ; for SDV1
+1198  447A              ; ------------------------------------------------
+1199  447A              mudarTamanhoBlocoPara512:
+1200  447A 3E 50        	ld	a, CMD16
+1201  447C 01 00 00     	ld	bc, 0
+1202  447F 11 00 02     	ld	de, 512
+1203  4482 C3 F7 44     	jp	SD_SEND_CMD_GET_ERROR
+1204  4485
+1205  4485              ; ------------------------------------------------
+1206  4485              ; Tenta inicializar um cartao SDV2, se houver erro
+1207  4485              ; o cartao deve ser SDV1
+1208  4485              ; ------------------------------------------------
+1209  4485              testaSDCV2:
+1210  4485 3E 48        	ld	a, CMD8
+1211  4487 11 AA 01     	ld	de, $1AA
+1212  448A CD 0C 45     	call	SD_SEND_CMD_2_ARGS_GET_R3
+1213  448D 21 F0 44     	ld	hl, SD_SEND_CMD1	; HL aponta para rotina correta
+1214  4490 38 03        	jr	c, .pula	; cartao recusou CMD8, enviar comando CMD1
+1215  4492 21 A6 44     	ld	hl, SD_SEND_ACMD41	; cartao aceitou CMD8, enviar comando ACMD41
+1216  4495              .pula:
+1217  4495 01 78 00     	ld	bc, 120		; 120 tentativas
+1218  4498              .loop:
+1219  4498 C5           	push	bc
+1220  4499 CD A5 44     	call	.jumpHL		; chamar rotina correta em HL
+1221  449C C1           	pop	bc
+1222  449D D0           	ret	nc
+1223  449E 10 F8        	djnz	.loop
+1224  44A0 0D           	dec	c
+1225  44A1 20 F5        	jr	nz, .loop
+1226  44A3 37           	scf
+1227  44A4 C9           	ret
+1228  44A5              .jumpHL:
+1229  44A5 E9           	jp	(hl)		; chamar rotina correta em HL
+1230  44A6
+1231  44A6              ; ------------------------------------------------
+1232  44A6              ; Enviar comando ACMD41
+1233  44A6              ; ------------------------------------------------
+1234  44A6              SD_SEND_ACMD41:
+1235  44A6 3E 77        	ld	a, CMD55
+1236  44A8 CD F2 44     	call	SD_SEND_CMD_NO_ARGS
+1237  44AB 3E 69        	ld	a, ACMD41
+1238  44AD 01 00 40     	ld	bc, $4000
+1239  44B0 51           	ld	d, c
+1240  44B1 59           	ld	e, c
+1241  44B2 18 43        	jr	SD_SEND_CMD_GET_ERROR
+1242  44B4
+1243  44B4              ; ------------------------------------------------
+1244  44B4              ; Ler registro CID ou CSD, o comando vem em A
+1245  44B4              ; ------------------------------------------------
+1246  44B4              lerBlocoCxD:
+1247  44B4 CD F2 44     	call	SD_SEND_CMD_NO_ARGS
+1248  44B7 D8           	ret	c
+1249  44B8 CD 4F 45     	call	WAIT_RESP_FE
+1250  44BB D8           	ret	c
+1251  44BC 0E 9F        	ld	c, PORTSPI
+1252  44BE 06 10        	ld	b, 16
+1253  44C0 ED B2        	inir
+1254  44C2 00           	nop
+1255  44C3 DB 9F        	in	a, (PORTSPI)
+1256  44C5 00           	nop
+1257  44C6 DB 9F        	in	a, (PORTSPI)	; byte de resposta
+1258  44C8 B7           	or	a
+1259  44C9 18 1E        	jr	desabilitaSDs
+1260  44CB
+1261  44CB              ; ------------------------------------------------
+1262  44CB              ; Algoritmo para inicializar um cartao SD
+1263  44CB              ; Destroi AF, B, DE
+1264  44CB              ; ------------------------------------------------
+1265  44CB              iniciaSD:
+1266  44CB CD E9 44     	call	desabilitaSDs
+1267  44CE
+1268  44CE 06 0A        	ld	b, 10		; enviar 80 pulsos de clock com cartao desabilitado
+1269  44D0              enviaClocksInicio:
+1270  44D0 3E FF        	ld	a, $FF		; manter MOSI em 1
+1271  44D2 D3 9F        	out	(PORTSPI), a
+1272  44D4 10 FA        	djnz	enviaClocksInicio
+1273  44D6 CD 79 45     	call	enableSD	; ativar cartao atual
+1274  44D9 06 08        	ld	b, 8		; 8 tentativas para CMD0
+1275  44DB              SD_SEND_CMD0:
+1276  44DB 3E 40        	ld	a, CMD0		; primeiro comando: CMD0
+1277  44DD 11 00 00     	ld	de, 0
+1278  44E0 C5           	push	bc
+1279  44E1 CD FF 44     	call	SD_SEND_CMD_2_ARGS_TEST_BUSY
+1280  44E4 C1           	pop	bc
+1281  44E5 D0           	ret	nc		; retorna se cartao respondeu ao CMD0
+1282  44E6 10 F3        	djnz	SD_SEND_CMD0
+1283  44E8 37           	scf			; cartao nao respondeu ao CMD0, informar erro
+1284  44E9              	; fall throw
+1285  44E9
+1286  44E9              ; ------------------------------------------------
+1287  44E9              ; Desabilitar (de-selecionar) todos os cartoes
+1288  44E9              ; Nao destroi registradores
+1289  44E9              ; ------------------------------------------------
+1290  44E9              desabilitaSDs:
+1291  44E9 F5           	push	af
+1292  44EA 3E FF        	ld	a, $FF
+1293  44EC D3 9E        	out	(PORTCFG), a
+1294  44EE F1           	pop	af
+1295  44EF C9           	ret
+1296  44F0
+1297  44F0              ; ------------------------------------------------
+1298  44F0              ; Enviar CMD1 para cartao. Carry indica erro
+1299  44F0              ; Destroi AF, BC, DE
+1300  44F0              ; ------------------------------------------------
+1301  44F0              SD_SEND_CMD1:
+1302  44F0 3E 41        	ld	a, CMD1
+1303  44F2              SD_SEND_CMD_NO_ARGS:
+1304  44F2 01 00 00     	ld	bc, 0
+1305  44F5 50           	ld	d, b
+1306  44F6 59           	ld	e, c
+1307  44F7              SD_SEND_CMD_GET_ERROR:
+1308  44F7 CD 25 45     	call	SD_SEND_CMD
+1309  44FA B7           	or	a
+1310  44FB C8           	ret	z		; se A=0 nao houve erro, retornar
+1311  44FC              	; fall throw
+1312  44FC
+1313  44FC              ; ------------------------------------------------
+1314  44FC              ; Informar erro
+1315  44FC              ; Nao destroi registradores
+1316  44FC              ; ------------------------------------------------
+1317  44FC              setaErro:
+1318  44FC 37           	scf
+1319  44FD 18 EA        	jr		desabilitaSDs
+1320  44FF
+1321  44FF              ; ------------------------------------------------
+1322  44FF              ; Enviar comando em A com 2 bytes de parametros
+1323  44FF              ; em DE e testar retorno BUSY
+1324  44FF              ; Retorna em A a resposta do cartao
+1325  44FF              ; Destroi AF, BC
+1326  44FF              ; ------------------------------------------------
+1327  44FF              SD_SEND_CMD_2_ARGS_TEST_BUSY:
+1328  44FF 01 00 00     	ld	bc, 0
+1329  4502 CD 25 45     	call	SD_SEND_CMD
+1330  4505 47           	ld	b, a
+1331  4506 E6 FE        	and	$FE		; testar bit 0 (flag BUSY)
+1332  4508 78           	ld	a, b
+1333  4509 20 F1        	jr	nz, setaErro	; BUSY em 1, informar erro
+1334  450B C9           	ret			; sem erros
+1335  450C
+1336  450C              ; ------------------------------------------------
+1337  450C              ; Enviar comando em A com 2 bytes de parametros
+1338  450C              ; em DE e ler resposta do tipo R3 em BC DE
+1339  450C              ; Retorna em A a resposta do cartao
+1340  450C              ; Destroi AF, BC, DE, HL
+1341  450C              ; ------------------------------------------------
+1342  450C              SD_SEND_CMD_2_ARGS_GET_R3:
+1343  450C CD FF 44     	call	SD_SEND_CMD_2_ARGS_TEST_BUSY
+1344  450F D8           	ret	c
+1345  4510 F5           	push	af
+1346  4511 CD 5D 45     	call	WAIT_RESP_NO_FF
+1347  4514 67           	ld	h, a
+1348  4515 CD 5D 45     	call	WAIT_RESP_NO_FF
+1349  4518 6F           	ld	l, a
+1350  4519 CD 5D 45     	call	WAIT_RESP_NO_FF
+1351  451C 57           	ld	d, a
+1352  451D CD 5D 45     	call	WAIT_RESP_NO_FF
+1353  4520 5F           	ld	e, a
+1354  4521 44           	ld	b, h
+1355  4522 4D           	ld	c, l
+1356  4523 F1           	pop	af
+1357  4524 C9           	ret
+1358  4525
+1359  4525              ; ------------------------------------------------
+1360  4525              ; Enviar comando em A com 4 bytes de parametros
+1361  4525              ; em BC DE e enviar CRC correto se for CMD0 ou
+1362  4525              ; CMD8 e aguardar processamento do cartao
+1363  4525              ; Destroi AF, BC
+1364  4525              ; ------------------------------------------------
+1365  4525              SD_SEND_CMD:
+1366  4525 CD 79 45     	call	enableSD
+1367  4528 D3 9F        	out	(PORTSPI), a
+1368  452A F5           	push	af
+1369  452B 78           	ld	a, b
+1370  452C 00           	nop
+1371  452D D3 9F        	out	(PORTSPI), a
+1372  452F 79           	ld	a, c
+1373  4530 00           	nop
+1374  4531 D3 9F        	out	(PORTSPI), a
+1375  4533 7A           	ld	a, d
+1376  4534 00           	nop
+1377  4535 D3 9F        	out	(PORTSPI), a
+1378  4537 7B           	ld	a, e
+1379  4538 00           	nop
+1380  4539 D3 9F        	out	(PORTSPI), a
+1381  453B F1           	pop	af
+1382  453C FE 40        	cp	CMD0
+1383  453E 06 95        	ld	b, $95		; CRC para CMD0
+1384  4540 28 08        	jr	z, enviaCRC
+1385  4542 FE 48        	cp	CMD8
+1386  4544 06 87        	ld	b, $87		; CRC para CMD8
+1387  4546 28 02        	jr	z, enviaCRC
+1388  4548 06 FF        	ld	b, $FF		; CRC dummy
+1389  454A              enviaCRC:
+1390  454A 78           	ld	a, b
+1391  454B D3 9F        	out	(PORTSPI), a
+1392  454D 18 0E        	jr	WAIT_RESP_NO_FF
+1393  454F
+1394  454F              ; ------------------------------------------------
+1395  454F              ; Esperar que resposta do cartao seja $FE
+1396  454F              ; Destroi AF, B
+1397  454F              ; ------------------------------------------------
+1398  454F              WAIT_RESP_FE:
+1399  454F 06 0A        	ld	b, 10		; 10 tentativas
+1400  4551              .loop:
+1401  4551 C5           	push	bc
+1402  4552 CD 5D 45     	call	WAIT_RESP_NO_FF	; esperar resposta diferente de $FF
+1403  4555 C1           	pop	bc
+1404  4556 FE FE        	cp	$FE		; resposta é $FE ?
+1405  4558 C8           	ret	z		; sim, retornamos com carry=0
+1406  4559 10 F6        	djnz	.loop
+1407  455B 37           	scf			; erro, carry=1
+1408  455C C9           	ret
+1409  455D
+1410  455D              ; ------------------------------------------------
+1411  455D              ; Esperar que resposta do cartao seja diferente
+1412  455D              ; de $FF
+1413  455D              ; Destroi AF, BC
+1414  455D              ; ------------------------------------------------
+1415  455D              WAIT_RESP_NO_FF:
+1416  455D 01 64 00     	ld	bc, 100		; 25600 tentativas
+1417  4560              .loop:
+1418  4560 DB 9F        	in	a, (PORTSPI)
+1419  4562 FE FF        	cp	$FF		; testa $FF
+1420  4564 C0           	ret	nz		; sai se nao for $FF
+1421  4565 10 F9        	djnz	.loop
+1422  4567 0D           	dec	c
+1423  4568 20 F6        	jr	nz, .loop
+1424  456A C9           	ret
+1425  456B
+1426  456B              ; ------------------------------------------------
+1427  456B              ; Esperar que resposta do cartao seja diferente
+1428  456B              ; de $00
+1429  456B              ; Destroi A, BC
+1430  456B              ; ------------------------------------------------
+1431  456B              WAIT_RESP_NO_00:
+1432  456B 01 00 80     	ld	bc, 32768	; 32768 tentativas
+1433  456E              .loop:
+1434  456E DB 9F        	in	a, (PORTSPI)
+1435  4570 B7           	or	a
+1436  4571 C0           	ret	nz		; se resposta for <> $00, sai
+1437  4572 10 FA        	djnz	.loop
+1438  4574 0D           	dec	c
+1439  4575 20 F7        	jr	nz, .loop
+1440  4577 37           	scf			; erro
+1441  4578 C9           	ret
+1442  4579
+1443  4579              ; ------------------------------------------------
+1444  4579              ; Ativa (seleciona) cartao atual baixando seu /CS
+1445  4579              ; Nao destroi registradores
+1446  4579              ; ------------------------------------------------
+1447  4579              enableSD:
+1448  4579 F5           	push	af
+1449  457A DB 9F        	in	a, (PORTSPI)	; dummy read
+1450  457C 3E FE        	ld	a, $FE
+1451  457E D3 9E        	out	(PORTCFG), a
+1452  4580 F1           	pop	af
+1453  4581 C9           	ret
+1454  4582
+1455  4582
+1456  4582              ; ------------------------------------------------
+1457  4582              ; Grava um bloco de 512 bytes no cartao
+1458  4582              ; HL aponta para o inicio dos dados
+1459  4582              ; BC e DE contem o numero do bloco (BCDE = 32 bits)
+1460  4582              ; Destroi AF, BC, DE, HL
+1461  4582              ; ------------------------------------------------
+1462  4582              GravarBloco:
+1463  4582 DD 7E 0F     	ld	a, (ix+15)	; verificar se eh SDV1 ou SDV2
+1464  4585 B7           	or	a
+1465  4586 CC 84 46     	call	z, blocoParaByte	; se for SDV1 coverter blocos para bytes Mister V1 pero en bloques
+1466  4589 CD 79 45     	call	enableSD
+1467  458C 3A 31 70     	ld	a, (WRKAREA.NUMBLOCKS)	; testar se Nextor quer gravar 1 ou mais blocos
+1468  458F 3D           	dec	a
+1469  4590 CA F4 45     	jp	z, .umBloco	; somente um bloco, gravar usando CMD24
+1470  4593
+1471  4593              ; multiplos blocos
+1472  4593 C5           	push	bc
+1473  4594 D5           	push	de
+1474  4595 3E 77        	ld	a, CMD55	; Multiplos blocos, mandar ACMD23 com total de blocos
+1475  4597 CD F2 44     	call	SD_SEND_CMD_NO_ARGS
+1476  459A 01 00 00     	ld	bc, 0
+1477  459D 51           	ld	d, c
+1478  459E 3A 31 70     	ld	a, (WRKAREA.NUMBLOCKS)	; parametro = total de blocos a gravar
+1479  45A1 5F           	ld	e, a
+1480  45A2 3E 57        	ld	a, ACMD23
+1481  45A4 CD F7 44     	call	SD_SEND_CMD_GET_ERROR
+1482  45A7 D1           	pop	de
+1483  45A8 C1           	pop	bc
+1484  45A9 DA FB 45     	jp	c, .erro	; erro no ACMD23
+1485  45AC 3E 59        	ld	a, CMD25	; comando CMD25 = write multiple blocks
+1486  45AE CD F7 44     	call	SD_SEND_CMD_GET_ERROR
+1487  45B1 DA FB 45     	jp	c, .erro	; erro
+1488  45B4              .loop:
+1489  45B4 3E FC        	ld	a, $FC		; mandar $FC para indicar que os proximos dados sao
+1490  45B6 D3 9F        	out	(PORTSPI), a	; dados para gravacao
+1491  45B8 01 9F 00     	ld	bc, PORTSPI
+1492  45BB ED B3        	otir
+1493  45BD ED B3        	otir
+1494  45BF 3E FF        	ld	a, $FF		; envia dummy CRC
+1495  45C1 D3 9F        	out	(PORTSPI), a
+1496  45C3 00           	nop
+1497  45C4 D3 9F        	out	(PORTSPI), a
+1498  45C6 CD 5D 45     	call	WAIT_RESP_NO_FF	; esperar cartao
+1499  45C9 E6 1F        	and	$1F		; testa bits erro
+1500  45CB FE 05        	cp	5
+1501  45CD 20 2C        	jr	nz, .erro	; resposta errada, informar erro
+1502  45CF CD 6B 45     	call	WAIT_RESP_NO_00	; esperar cartao
+1503  45D2 38 27        	jr	c, .erro
+1504  45D4 3A 31 70     	ld	a, (WRKAREA.NUMBLOCKS)	; testar se tem mais blocos para gravar
+1505  45D7 3D           	dec	a
+1506  45D8 32 31 70     	ld	(WRKAREA.NUMBLOCKS), a
+1507  45DB C2 B4 45     	jp	nz, .loop
+1508  45DE DB 9F        	in	a, (PORTSPI)	; acabou os blocos, fazer 2 dummy reads
+1509  45E0 00           	nop
+1510  45E1 DB 9F        	in	a, (PORTSPI)
+1511  45E3 3E FD        	ld	a, $FD		; enviar $FD para informar ao cartao que acabou os dados
+1512  45E5 D3 9F        	out	(PORTSPI), a
+1513  45E7 00           	nop
+1514  45E8 00           	nop
+1515  45E9 DB 9F        	in	a, (PORTSPI)	; dummy reads
+1516  45EB 00           	nop
+1517  45EC DB 9F        	in	a, (PORTSPI)
+1518  45EE CD 6B 45     	call	WAIT_RESP_NO_00	; esperar cartao
+1519  45F1 C3 21 46     	jp	.fim		; CMD25 concluido, sair informando nenhum erro
+1520  45F4
+1521  45F4              .umBloco:
+1522  45F4 3E 58        	ld	a, CMD24	; gravar somente um bloco com comando CMD24 = Write Single Block
+1523  45F6 CD F7 44     	call	SD_SEND_CMD_GET_ERROR
+1524  45F9 30 04        	jr	nc, .ok
+1525  45FB              .erro:
+1526  45FB 37           	scf			; informar erro
+1527  45FC C3 22 46     	jp	terminaLeituraEscritaBloco
+1528  45FF              .ok:
+1529  45FF 3E FE        	ld	a, $FE		; mandar $FE para indicar que vamos mandar dados para gravacao
+1530  4601 D3 9F        	out	(PORTSPI), a
+1531  4603 01 9F 00     	ld	bc, PORTSPI
+1532  4606 ED B3        	otir
+1533  4608 ED B3        	otir
+1534  460A 3E FF        	ld	a, $FF		; envia dummy CRC
+1535  460C D3 9F        	out	(PORTSPI), a
+1536  460E 00           	nop
+1537  460F D3 9F        	out	(PORTSPI), a
+1538  4611 CD 5D 45     	call	WAIT_RESP_NO_FF	; esperar cartao
+1539  4614 E6 1F        	and	$1F		; testa bits erro
+1540  4616 FE 05        	cp	5
+1541  4618 C2 FB 45     	jp	nz, .erro	; resposta errada, informar erro
+1542  461B              .esp:
+1543  461B CD 5D 45     	call	WAIT_RESP_NO_FF	; esperar cartao
+1544  461E B7           	or	a
+1545  461F 28 FA        	jr	z, .esp
+1546  4621              .fim:
+1547  4621 AF           	xor	a		; zera carry e informa nenhum erro
+1548  4622              terminaLeituraEscritaBloco:
+1549  4622 F5           	push	af
+1550  4623 CD E9 44     	call	desabilitaSDs	; desabilitar todos os cartoes
+1551  4626 F1           	pop	af
+1552  4627 C9           	ret
+1553  4628
+1554  4628              ; ------------------------------------------------
+1555  4628              ; Ler um bloco de 512 bytes do cartao
+1556  4628              ; HL aponta para o inicio dos dados
+1557  4628              ; BC e DE contem o numero do bloco (BCDE = 32 bits)
+1558  4628              ; Destroi AF, BC, DE, HL
+1559  4628              ; ------------------------------------------------
+1560  4628              LerBloco:
+1561  4628 DD 7E 0F     	ld	a, (ix+15)	; verificar se eh SDV1 ou SDV2
+1562  462B B7           	or	a
+1563  462C CC 84 46     	call	z, blocoParaByte	; se for SDV1 coverter blocos para bytes  Mister V1 pero en bloques
+1564  462F CD 79 45     	call	enableSD
+1565  4632 3A 31 70     	ld	a, (WRKAREA.NUMBLOCKS)	; testar se Nextor quer ler um ou mais blocos
+1566  4635 3D           	dec	a
+1567  4636 CA 63 46     	jp	z, .umBloco	; somente um bloco, pular
+1568  4639
+1569  4639              ; multiplos blocos
+1570  4639 3E 52        	ld	a, CMD18	; ler multiplos blocos com CMD18 = Read Multiple Blocks
+1571  463B CD F7 44     	call	SD_SEND_CMD_GET_ERROR
+1572  463E 38 2A        	jr	c, .erro
+1573  4640              .loop:
+1574  4640 CD 4F 45     	call	WAIT_RESP_FE
+1575  4643 38 25        	jr	c, .erro
+1576  4645 01 9F 00     	ld	bc, PORTSPI
+1577  4648 ED B2        	inir
+1578  464A ED B2        	inir
+1579  464C 00           	nop
+1580  464D DB 9F        	in	a, (PORTSPI)	; descarta CRC
+1581  464F 00           	nop
+1582  4650 DB 9F        	in	a, (PORTSPI)
+1583  4652 3A 31 70     	ld	a, (WRKAREA.NUMBLOCKS)	; testar se tem mais blocos para ler
+1584  4655 3D           	dec	a
+1585  4656 32 31 70     	ld	(WRKAREA.NUMBLOCKS), a
+1586  4659 C2 40 46     	jp	nz, .loop
+1587  465C 3E 4C        	ld	a, CMD12	; acabou os blocos, mandar CMD12 para cancelar leitura
+1588  465E CD F2 44     	call	SD_SEND_CMD_NO_ARGS
+1589  4661 18 1D        	jr	.fim
+1590  4663
+1591  4663              .umBloco:
+1592  4663 3E 51        	ld	a, CMD17	; ler somente um bloco com CMD17 = Read Single Block
+1593  4665 CD F7 44     	call	SD_SEND_CMD_GET_ERROR
+1594  4668 30 04        	jr	nc, .ok
+1595  466A              .erro:
+1596  466A 37           	scf
+1597  466B C3 22 46     	jp	terminaLeituraEscritaBloco
+1598  466E              .ok:
+1599  466E CD 4F 45     	call	WAIT_RESP_FE
+1600  4671 38 F7        	jr	c, .erro
+1601  4673 01 9F 00     	ld	bc, PORTSPI
+1602  4676 ED B2        	inir
+1603  4678 ED B2        	inir
+1604  467A 00           	nop
+1605  467B DB 9F        	in	a, (PORTSPI)	; descarta CRC
+1606  467D 00           	nop
+1607  467E DB 9F        	in	a, (PORTSPI)
+1608  4680              .fim:
+1609  4680 AF           	xor	a		; zera carry para informar leitura sem erros
+1610  4681 C3 22 46     	jp	terminaLeituraEscritaBloco
+1611  4684
+1612  4684              ; ------------------------------------------------
+1613  4684              ; Converte blocos para bytes. Na pratica faz
+1614  4684              ; BC DE = (BC DE) * 512
+1615  4684              ; ------------------------------------------------
+1616  4684              blocoParaByte:
+1617  4684 41           	ld	b, c
+1618  4685 4A           	ld	c, d
+1619  4686 53           	ld	d, e
+1620  4687 1E 00        	ld	e, 0
+1621  4689 CB 22        	sla	d
+1622  468B CB 11        	rl	c
+1623  468D CB 10        	rl	b
+1624  468F C9           	ret
+1625  4690
+1626  4690              ; ------------------------------------------------
+1627  4690              ; Funcoes utilitarias
+1628  4690              ; ------------------------------------------------
+1629  4690
+1630  4690              ; ------------------------------------------------
+1631  4690              ; Imprime string na tela apontada por DE
+1632  4690              ; Destroi todos os registradores
+1633  4690              ; ------------------------------------------------
+1634  4690              printString:
+1635  4690 1A           	ld	a, (de)
+1636  4691 B7           	or	a
+1637  4692 C8           	ret	z
+1638  4693 CD A2 00     	call	BIOS_CHPUT
+1639  4696 13           	inc	de
+1640  4697 18 F7        	jr	printString
+1641  4699
+1642  4699
+1643  4699              ; ------------------------------------------------
+1644  4699              ; Converte o byte em A para string em decimal no
+1645  4699              ; buffer apontado por DE
+1646  4699              ; Destroi AF, BC, HL, DE
+1647  4699              ; ------------------------------------------------
+1648  4699              DecToAscii:
+1649  4699 FD 21 38 70  	ld	iy, WRKAREA.TEMP
+1650  469D 26 00        	ld	h, 0
+1651  469F 6F           	ld	l, a		; copiar A para HL
+1652  46A0 FD 36 00 01  	ld	(iy+0), 1	; flag para indicar que devemos cortar os zeros a esquerda
+1653  46A4 01 9C FF     	ld	bc, -100	; centenas
+1654  46A7 CD B5 46     	call	.num1
+1655  46AA 0E F6        	ld	c, -10		; dezenas
+1656  46AC CD B5 46     	call	.num1
+1657  46AF FD 36 00 02  	ld	(iy+0), 2	; unidade deve exibir 0 se for zero e nao corta-lo
+1658  46B3 0E FF        	ld	c, -1		; unidades
+1659  46B5              .num1:
+1660  46B5 3E 2F        	ld	a, '0'-1
+1661  46B7              .num2:
+1662  46B7 3C           	inc	a		; contar o valor em ascii de '0' a '9'
+1663  46B8 09           	add	hl, bc		; somar com negativo
+1664  46B9 38 FC        	jr	c, .num2	; ainda nao zeramos
+1665  46BB ED 42        	sbc	hl, bc		; retoma valor original
+1666  46BD FD 35 00     	dec	(iy+0)		; se flag do corte do zero indicar para nao cortar, pula
+1667  46C0 20 08        	jr	nz, .naozero
+1668  46C2 FE 30        	cp	'0'		; devemos cortar os zeros a esquerda. Eh zero?
+1669  46C4 20 04        	jr	nz, .naozero
+1670  46C6 FD 34 00     	inc	(iy+0)		; se for zero, nao salvamos e voltamos a flag
+1671  46C9 C9           	ret
+1672  46CA              .naozero:
+1673  46CA 12           	ld	(de), a		; eh zero ou eh outro numero, salvar
+1674  46CB 13           	inc	de		; incrementa ponteiro de destino
+1675  46CC C9           	ret
+1676  46CD
+1677  46CD              ; ------------------------------------------------
+1678  46CD              ; Converte o byte em A para string em hexa no
+1679  46CD              ; buffer apontado por DE
+1680  46CD              ; Destroi AF, C, DE
+1681  46CD              ; ------------------------------------------------
+1682  46CD              HexToAscii:
+1683  46CD 4F           	ld	c, a
+1684  46CE 1F           	rra
+1685  46CF 1F           	rra
+1686  46D0 1F           	rra
+1687  46D1 1F           	rra
+1688  46D2 CD D6 46     	call	.conv
+1689  46D5 79           	ld  	a, c
+1690  46D6              .conv:
+1691  46D6 E6 0F        	and	$0F
+1692  46D8 C6 90        	add	a, $90
+1693  46DA 27           	daa
+1694  46DB CE 40        	adc	a, $40
+1695  46DD 27           	daa
+1696  46DE 12           	ld	(de), a
+1697  46DF 13           	inc	de
+1698  46E0 C9           	ret
+1699  46E1
+1700  46E1              ; ------------------------------------------------
+1701  46E1              ; Converte o byte em A para string em decimal e
+1702  46E1              ; imprime na tela
+1703  46E1              ; Destroi AF, BC, HL, DE
+1704  46E1              ; ------------------------------------------------
+1705  46E1              printDecToAscii:
+1706  46E1 26 00        	ld	h, 0
+1707  46E3 6F           	ld	l, a		; copiar A para HL
+1708  46E4 06 01        	ld	b, 1		; flag para indicar que devemos cortar os zeros a esquerda
+1709  46E6 11 9C FF     	ld	de, -100	; centenas
+1710  46E9 CD F5 46     	call	.num1
+1711  46EC 1E F6        	ld	e, -10		; dezenas
+1712  46EE CD F5 46     	call	.num1
+1713  46F1 06 02        	ld	b, 2		; unidade deve exibir 0 se for zero e nao corta-lo
+1714  46F3 1E FF        	ld	e, -1		; unidades
+1715  46F5              .num1:
+1716  46F5 3E 2F        	ld	a, '0'-1
+1717  46F7              .num2:
+1718  46F7 3C           	inc	a		; contar o valor em ascii de '0' a '9'
+1719  46F8 19           	add	hl, de		; somar com negativo
+1720  46F9 38 FC        	jr	c, .num2	; ainda nao zeramos
+1721  46FB ED 52        	sbc	hl, de		; retoma valor original
+1722  46FD 10 06        	djnz	.naozero	; se flag do corte do zero indicar para nao cortar, pula
+1723  46FF FE 30        	cp	'0'		; devemos cortar os zeros a esquerda. Eh zero?
+1724  4701 20 02        	jr	nz, .naozero
+1725  4703 04           	inc	b		; se for zero, nao imprimimos e voltamos a flag
+1726  4704 C9           	ret
+1727  4705              .naozero:
+1728  4705 E5           	push	hl		; nao eh zero ou eh outro numero, imprimir
+1729  4706 C5           	push	bc
+1730  4707 CD A2 00     	call	BIOS_CHPUT
+1731  470A C1           	pop	bc
+1732  470B E1           	pop	hl
+1733  470C C9           	ret
+1734  470D
+1735  470D              ; ------------------------------------------------
+1736  470D              ; Procura pelo nome do fabricante em uma tabela.
+1737  470D              ; A contem o byte do fabricante
+1738  470D              ; Devolve HL apontando para o buffer do fabricante
+1739  470D              ; e BC com o comprimento do texto
+1740  470D              ; Destroi AF, BC, HL
+1741  470D              ; ------------------------------------------------
+1742  470D              pegaFabricante:
+1743  470D 4F           	ld	c, a
+1744  470E 21 2F 47     	ld	hl, tblFabricantes
+1745  4711
+1746  4711              .loop:
+1747  4711 7E           	ld	a, (hl)
+1748  4712 23           	inc	hl
+1749  4713 B9           	cp	c
+1750  4714 28 0C        	jr	z, .achado
+1751  4716 B7           	or	a
+1752  4717 28 09        	jr	z, .achado
+1753  4719 C5           	push	bc
+1754  471A CD 22 47     	call	.achado
+1755  471D 09           	add	hl, bc
+1756  471E 23           	inc	hl
+1757  471F C1           	pop	bc
+1758  4720 18 EF        	jr	.loop
+1759  4722
+1760  4722              .achado:
+1761  4722 0E 00        	ld	c, 0
+1762  4724 E5           	push	hl
+1763  4725 AF           	xor	a
+1764  4726              .loop2:
+1765  4726 0C           	inc	c
+1766  4727 23           	inc	hl
+1767  4728 BE           	cp	(hl)
+1768  4729 20 FB        	jr	nz, .loop2
+1769  472B E1           	pop	hl
+1770  472C 06 00        	ld	b, 0
+1771  472E C9           	ret
+1772  472F
+1773  472F              ; ---------------------------------------------------------------------------
+1774  472F              tblFabricantes:
+1775  472F 01           	db	1
+1776  4730 50 61 6E 61  	db	"Panasonic",0
+1776  4734 73 6F 6E 69
+1776  4738 63 00
+1777  473A 02           	db	2
+1778  473B 54 6F 73 68  	db	"Toshiba",0
+1778  473F 69 62 61 00
+1779  4743 03           	db	3
+1780  4744 53 61 6E 44  	db	"SanDisk",0
+1780  4748 69 73 6B 00
+1781  474C 04           	db	4
+1782  474D 53 4D 49 2D  	db	"SMI-S",0
+1782  4751 53 00
+1783  4753 06           	db	6
+1784  4754 52 65 6E 65  	db	"Renesas",0
+1784  4758 73 61 73 00
+1785  475C 11           	db	17
+1786  475D 44 61 6E 65  	db	"Dane-Elec",0
+1786  4761 2D 45 6C 65
+1786  4765 63 00
+1787  4767 13           	db	19
+1788  4768 4B 69 6E 67  	db	"KingMax",0
+1788  476C 4D 61 78 00
+1789  4770 15           	db	21
+1790  4771 53 61 6D 73  	db	"Samsung",0
+1790  4775 75 6E 67 00
+1791  4779 18           	db	24
+1792  477A 49 6E 66 69  	db	"Infineon",0
+1792  477E 6E 65 6F 6E
+1792  4782 00
+1793  4783 1A           	db	26
+1794  4784 50 51 49 00  	db	"PQI",0
+1795  4788 1B           	db	27
+1796  4789 53 6F 6E 79  	db	"Sony",0
+1796  478D 00
+1797  478E 1C           	db	28
+1798  478F 54 72 61 6E  	db	"Transcend",0
+1798  4793 73 63 65 6E
+1798  4797 64 00
+1799  4799 1D           	db	29
+1800  479A 41 2D 44 41  	db	"A-DATA",0
+1800  479E 54 41 00
+1801  47A1 1F           	db	31
+1802  47A2 53 69 6C 69  	db	"SiliconPower",0
+1802  47A6 63 6F 6E 50
+1802  47AA 6F 77 65 72
+1802  47AE 00
+1803  47AF 27           	db	39
+1804  47B0 56 65 72 62  	db	"Verbatim",0
+1804  47B4 61 74 69 6D
+1804  47B8 00
+1805  47B9 41           	db	65
+1806  47BA 4F 4B 49 00  	db	"OKI",0
+1807  47BE 73           	db	115
+1808  47BF 53 69 6C 76  	db	"SilverHT",0
+1808  47C3 65 72 48 54
+1808  47C7 00
+1809  47C8 89           	db	137
+1810  47C9 4C 2E 44 61  	db	"L.Data",0
+1810  47CD 74 61 00
+1811  47D0 00           	db	0
+1812  47D1 47 65 6E 65  	db	"Generico",0
+1812  47D5 72 69 63 6F
+1812  47D9 00
+1813  47DA
+1814  47DA              ; ------------------------------------------------
+1815  47DA              strTitulo:
+1816  47DA 4D 53 58 31  	db	"MSX1 FPGA",13,10
+1816  47DE 20 46 50 47
+1816  47E2 41 0D 0A
+1817  47E5 53 44 20 4E  	db	"SD Nextor Driver",13,10
+1817  47E9 65 78 74 6F
+1817  47ED 72 20 44 72
+1817  47F1 69 76 65 72
+1817  47F5 0D 0A
+1818  47F7 56 65 72 73  	db	"Version "
+1818  47FB 69 6F 6E 20
+1819  47FF 31 2E 30 2E  	db	VER_MAIN + $30, '.', VER_SEC + $30, '.', VER_REV + $30
+1819  4803 30
+1820  4804 0D 0A        	db	13, 10
+1821  4806 43 6F 70 79  	db	"Copyright (c) 2016",13,10
+1821  480A 72 69 67 68
+1821  480E 74 20 28 63
+1821  4812 29 20 32 30
+1821  4816 31 36 0D 0A
+1822  481A 46 61 62 69  	db	"Fabio Belavenuto",13,10
+1822  481E 6F 20 42 65
+1822  4822 6C 61 76 65
+1822  4826 6E 75 74 6F
+1822  482A 0D 0A
+1823  482C              ;	db	"Licenced under",13,10
+1824  482C              ;	db	"CERN OHL v1.1",13,10
+1825  482C              ;	db	"http://ohwr.org/cernohl",13,10
+1826  482C              	; fall throw
+1827  482C              strCrLf:
+1828  482C 0D 0A 00     	db	13,10,0
+1829  482F              strCartao:
+1830  482F 43 61 72 64  	db	"Card: ",0
+1830  4833 3A 20 00
+1831  4836              strVazio:
+1832  4836 4E 6F 20 63  	db	"No card!",13,10,0
+1832  483A 61 72 64 21
+1832  483E 0D 0A 00
+1833  4841              strNaoIdentificado:
+1834  4841 4E 6F 20 69  	db	"No identification!",13,10,0
+1834  4845 64 65 6E 74
+1834  4849 69 66 69 63
+1834  484D 61 74 69 6F
+1834  4851 6E 21 0D 0A
+1834  4855 00
+1835  4856              strSDV1:
+1836  4856 53 44 56 31  	db	"SDV1 - ",0
+1836  485A 20 2D 20 00
+1837  485E              strSDV2:
+1838  485E 53 44 56 32  	db	"SDV2 - ",0
+1838  4862 20 2D 20 00
+1839  4866
+1840  4866              ; RAM area
+1841  4866              	org		$7000
+1842  7000
+1843  7000              ; Work area variables
+1844  7000              WRKAREA:
+1845  7000 00 00 00...  .BCSD 		ds 16	; Card Specific Data
+1846  7010 00 00 00...  .BCID1		ds 16	; Card-ID of card1
+1847  7020 00 00 00...  .BCID2		ds 16	; Card-ID of card2
+1848  7030 01           .NUMSD		db 1	; Currently selected card: 1 or 2
+1849  7031 00           .NUMBLOCKS	ds 1	; Number of blocks in multi-block operations
+1850  7032 00 00 00     .BLOCKS1	ds 3	; 3 bytes. Size of card1, in blocks.
+1851  7035 00 00 00     .BLOCKS2	ds 3	; 3 bytes. Size of card2, in blocks.
+1852  7038 00           .TEMP		ds 1	; Temporary data
+1853  7039
+1854  7039               IF 0 = 0
+1855  7039 00           WRKAREA.FLAGS		ds 1	; Flags for soft-diskchange
+1856  703A               ENDIF
+1857  703A
+1858  703A              ;-----------------------------------------------------------------------------
+1859  703A              ;
+1860  703A              ; End of the driver code
+1861  703A
+1862  703A              DRV_END:
+1863  703A
+1864  703A FF FF FF...  	ds	3ED0h-(DRV_END-DRV_START), $FF
+1865  7FD0
+# file closed: DriverM.asm
